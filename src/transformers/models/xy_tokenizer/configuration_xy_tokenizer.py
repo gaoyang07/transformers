@@ -29,45 +29,45 @@ class XYTokenizerConfig(PretrainedConfig):
     documentation from [`PretrainedConfig`] for more information.
 
     Args:
-            input_sample_rate (`int`, *optional*, defaults to 16000):
-                The sampling rate of the input audio.
-            output_sample_rate (`int`, *optional*, defaults to 16000):
-                The sampling rate of the output audio.
-            encoder_downsample_rate (`int`, *optional*, defaults to 1280):
-                The total downsampling factor of the encoder part.
-            decoder_upsample_rate (`int`, *optional*, defaults to 1920):
-                The total upsampling factor of the decoder part.
-            code_dim (`int`, *optional*, defaults to 1280):
-                The dimension of the code embeddings.
-            semantic_encoder_d_model (`int`, *optional*, defaults to 1280):
-                Hidden dimension for the semantic encoder.
-            acoustic_encoder_d_model (`int`, *optional*, defaults to 1280):
-                Hidden dimension for the acoustic encoder.
-            num_quantizers (`int`, *optional*, defaults to 32):
-                Number of residual quantizers.
-            codebook_size (`int`, *optional*, defaults to 1024):
-                Size of each codebook.
-            codebook_dim (`int`, *optional*, defaults to 8):
-                Dimension of each codebook entry.
-            hidden_size (`int`, *optional*, defaults to 1280):
-                Hidden size for transformer layers.
-            num_attention_heads (`int`, *optional*, defaults to 20):
-                Number of attention heads in transformer layers.
-            intermediate_size (`int`, *optional*, defaults to 5120):
-                Intermediate size in feed-forward networks.
-            num_hidden_layers (`int`, *optional*, defaults to 32):
-                Number of hidden layers in transformers.
-            activation_function (`str`, *optional*, defaults to `"gelu"`):
-                The activation function to use.
-            dropout (`float`, *optional*, defaults to 0.0):
-                The dropout probability.
-            attention_dropout (`float`, *optional*, defaults to 0.0):
-                The dropout probability for attention layers.
-            max_position_embeddings (`int`, *optional*, defaults to 1500):
-                Maximum position embeddings.
-            initializer_range (`float`, *optional*, defaults to 0.02):
-                The standard deviation for weight initialization.
-            use_cache (`bool`, *optional*, defaults to `True`): <fill_docstring>
+        input_sample_rate (`int`, *optional*, defaults to 16000):
+            The sampling rate of the input audio.
+        output_sample_rate (`int`, *optional*, defaults to 16000):
+            The sampling rate of the output audio.
+        encoder_downsample_rate (`int`, *optional*, defaults to 1280):
+            The total downsampling factor of the encoder part.
+        decoder_upsample_rate (`int`, *optional*, defaults to 1920):
+            The total upsampling factor of the decoder part.
+        code_dim (`int`, *optional*, defaults to 1280):
+            The dimension of the code embeddings.
+        semantic_encoder_d_model (`int`, *optional*, defaults to 1280):
+            Hidden dimension for the semantic encoder.
+        acoustic_encoder_d_model (`int`, *optional*, defaults to 1280):
+            Hidden dimension for the acoustic encoder.
+        num_quantizers (`int`, *optional*, defaults to 32):
+            Number of residual quantizers.
+        codebook_size (`int`, *optional*, defaults to 1024):
+            Size of each codebook.
+        codebook_dim (`int`, *optional*, defaults to 8):
+            Dimension of each codebook entry.
+        hidden_size (`int`, *optional*, defaults to 1280):
+            Hidden size for transformer layers.
+        num_attention_heads (`int`, *optional*, defaults to 20):
+            Number of attention heads in transformer layers.
+        intermediate_size (`int`, *optional*, defaults to 5120):
+            Intermediate size in feed-forward networks.
+        num_hidden_layers (`int`, *optional*, defaults to 32):
+            Number of hidden layers in transformers.
+        activation_function (`str`, *optional*, defaults to `"gelu"`):
+            The activation function to use.
+        dropout (`float`, *optional*, defaults to 0.0):
+            The dropout probability.
+        attention_dropout (`float`, *optional*, defaults to 0.0):
+            The dropout probability for attention layers.
+        max_position_embeddings (`int`, *optional*, defaults to 1500):
+            Maximum position embeddings.
+        initializer_range (`float`, *optional*, defaults to 0.02):
+            The standard deviation for weight initialization.
+        use_cache (`bool`, *optional*, defaults to `True`): <fill_docstring>
     """
     model_type = "xy_tokenizer"
 

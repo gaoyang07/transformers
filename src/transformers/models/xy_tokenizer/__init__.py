@@ -19,6 +19,7 @@ from ...utils.import_utils import define_import_structure
 
 if TYPE_CHECKING:
     from .configuration_xy_tokenizer import *
+    from .feature_extraction_xy_tokenizer import *
     from .modeling_xy_tokenizer import *
 else:
     import sys
