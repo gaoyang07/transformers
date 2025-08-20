@@ -18,6 +18,7 @@ Feature extractor class for XY-Tokenizer
 import math
 from functools import partial
 from typing import List, Optional, Union
+from collections import deque
 
 import torch
 import torch.nn.functional as F
@@ -37,6 +38,7 @@ class ExtractorIterator:
         batch_size=1,
         chunk_length=30,
         overlap_seconds=10,
+        overlap_side="both",
         sampling_rate=16000,
         encode_func=None,
     ) -> None:
@@ -44,12 +46,16 @@ class ExtractorIterator:
         self.batch_size = batch_size
         self.chunk_length = chunk_length
         self.overlap_seconds = overlap_seconds
+        self.overlap_side = overlap_side
         self.sampling_rate = sampling_rate
 
         # duration_size is the effective audio length of each processing
         self.chunk_size = int(self.chunk_length * self.sampling_rate)
-        self.duration_seconds = self.chunk_length - self.overlap_seconds
-        self.duration_size = int(self.duration_seconds * self.sampling_rate)
+        self.overlap_size = int(self.overlap_seconds * self.sampling_rate)
+        self.duration_size = self.chunk_size - self.overlap_size
+        assert (
+            (overlap_side == "right") or (self.overlap_size % 2 == 0)
+        ), '`overlap_seconds` must be divisible by 2 when `overlap_side` is "both".'
         # Note: here we only process non-overlapping blocks, and overlap will be processed outside (if needed)
         # or more explicitly in the iterator. For simplicity, we assume that the blocks are based on duration_size
 
@@ -65,33 +71,13 @@ class ExtractorIterator:
 
         # NOTE: The chunk size output by chunk_and_pad_view is duration_size
         wav_tensor = torch.zeros(self.batch_size, 1, self.chunk_size)
-        input_lengths = torch.zeros(self.batch_size, dtype=torch.long)
+        input_lengths = deque(maxlen=self.batch_size)
         input_seq_no = torch.zeros(self.batch_size, dtype=torch.long)
-
-        def chunk_and_pad_view(tensor, seq_no):
-            x = tensor[0:1, :].unsqueeze(0)
-
-            stride = self.duration_size
-            kernel = self.chunk_size
-            B, C, L = x.shape
-
-            num_chunks = math.ceil(L / stride)
-            target_len = (num_chunks - 1) * stride + kernel
-            padding_size = max(0, target_len - L)
-            x_padded = F.pad(x, (0, padding_size), "constant", 0)
-            output_tensor = (
-                x_padded.unfold(dimension=2, size=kernel, step=stride)
-                .squeeze(0)
-                .transpose(0, 1)
-            )
-            output_lengths = torch.full((num_chunks,), kernel, dtype=torch.long)
-            for i in range(num_chunks):
-                output_lengths[i] = min(output_lengths[i], L - stride * i)
-            output_seq_no = torch.full((num_chunks,), seq_no, dtype=torch.long)
-            return output_tensor, output_lengths, output_seq_no
+        
+        right_boundary = self.get_right_boundary()
 
         for i, sample in enumerate(self.data):
-            sample_chunks, sample_lengths, sample_seq_no = chunk_and_pad_view(sample, i)
+            sample_chunks, sample_lengths, sample_seq_no = self.chunk_and_pad_view(sample, i)
 
             processed_in_sample = 0
             while processed_in_sample < len(sample_chunks):
@@ -110,9 +96,7 @@ class ExtractorIterator:
                 wav_tensor[start_idx_batch:end_idx_batch] = sample_chunks[
                     start_idx_sample:end_idx_sample
                 ]
-                input_lengths[start_idx_batch:end_idx_batch] = sample_lengths[
-                    start_idx_sample:end_idx_sample
-                ]
+                input_lengths.extend(sample_lengths[start_idx_sample:end_idx_sample])
                 input_seq_no[start_idx_batch:end_idx_batch] = sample_seq_no[
                     start_idx_sample:end_idx_sample
                 ]
@@ -123,10 +107,16 @@ class ExtractorIterator:
 
                 # If the batch is full, yield a copy and reset
                 if batch_num == self.batch_size:
-                    list_x = [
-                        wav_tensor[xi, :, :x_len].reshape(-1).cpu().numpy()
-                        for xi, x_len in enumerate(input_lengths.tolist())
-                    ]
+                    list_x = []
+                    for xi, (_, right) in enumerate(input_lengths):
+                        if right == right_boundary and torch.any(
+                            wav_tensor[xi, :, right:] != 0
+                        ):
+                            list_x.append(wav_tensor[xi].reshape(-1).cpu().numpy())
+                        else:
+                            list_x.append(
+                                wav_tensor[xi, :, :right].reshape(-1).cpu().numpy()
+                            )
                     yield BatchFeature(
                         {
                             **self.encode_func(list_x),
@@ -138,15 +128,22 @@ class ExtractorIterator:
                     # Reset batch counter and Tensor content
                     batch_num = 0
                     wav_tensor.zero_()
-                    input_lengths.zero_()
+                    input_lengths.clear()
                     input_seq_no.zero_()
 
         # After the loop, process the last incomplete batch
         if batch_num > 0:
-            list_x = [
-                wav_tensor[xi, :, :x_len].reshape(-1).cpu().numpy()
-                for xi, x_len in enumerate(input_lengths.tolist())
-            ]
+            list_x = []
+            for xi in range(batch_num):
+                _, right = input_lengths[xi]
+                if right == right_boundary and torch.any(
+                    wav_tensor[xi, :, right:] != 0
+                ):
+                    list_x.append(wav_tensor[xi].reshape(-1).cpu().numpy())
+                else:
+                    list_x.append(
+                        wav_tensor[xi, :, :right].reshape(-1).cpu().numpy()
+                    )
             yield BatchFeature(
                 {
                     **self.encode_func(list_x),
@@ -154,6 +151,50 @@ class ExtractorIterator:
                     "chunk_seq_no": input_seq_no[:batch_num].clone(),
                 }
             )
+
+    def chunk_and_pad_view(self, tensor, seq_no):
+        x = tensor[0:1, :].unsqueeze(0)
+        
+        stride = self.duration_size
+        kernel = self.chunk_size
+        B, C, L = x.shape
+    
+        num_chunks = max(0, math.ceil((L - kernel) / stride)) + 1
+        target_len = (num_chunks - 1) * stride + kernel
+        padding_size = max(0, target_len - L)
+        x_padded = F.pad(x, (0, padding_size), "constant", 0)
+        output_tensor = (
+            x_padded.unfold(dimension=2, size=kernel, step=stride)
+            .squeeze(0)
+            .transpose(0, 1)
+        )
+        
+        output_lengths = self.get_windows_boundaries(num_chunks, L)
+        output_seq_no = torch.full((num_chunks,), seq_no, dtype=torch.long)
+        return output_tensor, output_lengths, output_seq_no
+
+    def get_left_boundary(self):
+        if self.overlap_side == "right":
+            return 0
+        else:
+            return int(self.overlap_size / 2)
+
+    def get_right_boundary(self):
+        if self.overlap_side == "right":
+            return self.duration_size
+        else:
+            return self.chunk_size - int(self.overlap_size / 2)
+            
+    def get_windows_boundaries(self, num_chunks, seq_len):
+        left_boundary = self.get_left_boundary()
+        right_boundary = self.get_right_boundary()
+
+        output_lengths = [(left_boundary, right_boundary) for _ in range(num_chunks)]
+        output_lengths[0] = (0, output_lengths[0][1])
+        output_lengths[-1] = (
+            output_lengths[-1][0], seq_len - self.duration_size * (num_chunks-1)
+        )
+        return output_lengths
 
 
 class XYTokenizerFeatureExtractor(WhisperFeatureExtractor):
@@ -171,7 +212,8 @@ class XYTokenizerFeatureExtractor(WhisperFeatureExtractor):
         dither=0.0,
         return_attention_mask=False,
         max_frequency=None,
-        batch_size=None,
+        batch_size=8,
+        overlap_side="both", 
         **kwargs,
     ):
         super().__init__(
@@ -201,6 +243,7 @@ class XYTokenizerFeatureExtractor(WhisperFeatureExtractor):
             norm="slaney",
             mel_scale="slaney",
         )
+        self.overlap_side = overlap_side
 
     def __call__(
         self,
@@ -224,9 +267,10 @@ class XYTokenizerFeatureExtractor(WhisperFeatureExtractor):
 
         return ExtractorIterator(
             raw_speech,
-            batch_size=len(raw_speech) if self.batch_size is None else self.batch_size,
+            batch_size=self.batch_size if self.batch_size else len(raw_speech), 
             chunk_length=self.chunk_length,
             overlap_seconds=overlap_seconds,
+            overlap_side=self.overlap_side,
             sampling_rate=self.sampling_rate,
             encode_func=partial(
                 super().__call__,
@@ -245,4 +289,4 @@ class XYTokenizerFeatureExtractor(WhisperFeatureExtractor):
         )
 
 
-__all__ = ["XYTokenizerFeatureExtractor", "ExtractorIterator"]
+__all__ = ["XYTokenizerFeatureExtractor"]

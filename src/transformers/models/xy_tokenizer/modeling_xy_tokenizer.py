@@ -28,7 +28,6 @@ from einops import rearrange
 from torch.nn.utils.parametrizations import weight_norm
 
 from ...activations import ACT2FN
-from ...cache_utils import Cache
 from ...feature_extraction_utils import BatchFeature
 from ...modeling_attn_mask_utils import _prepare_4d_attention_mask
 from ...modeling_outputs import ModelOutput
@@ -175,14 +174,12 @@ class XYTokenizerAttention(nn.Module):
         num_heads: int,
         dropout: float = 0.0,
         is_causal: bool = False,
-        config: Optional[XYTokenizerConfig] = None,
     ):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.dropout = dropout
         self.head_dim = embed_dim // num_heads
-        self.config = config
 
         if (self.head_dim * num_heads) != self.embed_dim:
             raise ValueError(
@@ -199,6 +196,19 @@ class XYTokenizerAttention(nn.Module):
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+
+    def _create_attention_mask(self, seq_len, max_len, device, dtype):
+        bsz = seq_len.size(0)
+        mask = torch.ones(bsz, 1, max_len, max_len, device=device, dtype=dtype)
+        seq_indices = torch.arange(max_len, device=device).unsqueeze(0)
+        seq_len_expanded = seq_len.unsqueeze(1)
+        valid_mask = seq_indices < seq_len_expanded.unsqueeze(-1)
+        mask = mask * (valid_mask.unsqueeze(2) & valid_mask.unsqueeze(3)).to(dtype)
+        if self.is_causal:
+            causal_mask = torch.triu(torch.ones(max_len, max_len, device=device, dtype=torch.bool), diagonal=1)
+            mask = mask * (~causal_mask.unsqueeze(0).unsqueeze(1)).to(dtype)
+        mask = mask + (1.0 - mask) * torch.finfo(dtype).min
+        return mask
 
     def forward(
         self,
@@ -234,35 +244,10 @@ class XYTokenizerAttention(nn.Module):
         
         # Create attention mask based on sequence lengths if provided
         if seq_len is not None:
-            # Create a mask for valid tokens
-            max_len = tgt_len
-            seq_indices = torch.arange(max_len, device=hidden_states.device).unsqueeze(0)
-            valid_mask = seq_indices < seq_len.unsqueeze(-1)
-            
-            # Convert to attention mask format (batch_size, seq_len)
-            attention_mask = valid_mask.float()
-            
             # Apply causal mask if needed
-            if self.is_causal:
-                causal_mask = torch.triu(
-                    torch.ones(max_len, max_len, device=hidden_states.device, dtype=torch.bool),
-                    diagonal=1,
-                )
-                # Create causal attention mask
-                causal_attention_mask = (~causal_mask).float().unsqueeze(0).expand(bsz, -1, -1)
-                # Combine with length-based mask
-                attention_mask = attention_mask.unsqueeze(1) * causal_attention_mask
-                attention_mask = attention_mask.masked_fill(attention_mask == 0, float('-inf'))
-                attention_mask = attention_mask.masked_fill(attention_mask == 1, 0.0)
-                # Reshape for multi-head attention
-                attention_mask = attention_mask.unsqueeze(1).expand(-1, self.num_heads, -1, -1)
-                attention_mask = attention_mask.reshape(bsz * self.num_heads, tgt_len, src_len)
-                attn_weights = attn_weights + attention_mask
-            else:
-                # For non-causal attention, apply length-based masking after softmax
-                length_mask = valid_mask.unsqueeze(1).expand(-1, tgt_len, -1)
-                length_mask = length_mask.unsqueeze(1).expand(-1, self.num_heads, -1, -1)
-                length_mask = length_mask.reshape(bsz * self.num_heads, tgt_len, src_len)
+            attn_mask = self._create_attention_mask(seq_len, tgt_len, hidden_states.device, attn_weights.dtype)
+            attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len) + attn_mask
+            attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
         elif attention_mask is not None:
             # Handle externally provided attention mask
             if attention_mask.dim() == 2:
@@ -310,13 +295,12 @@ class XYTokenizerAttention(nn.Module):
 class XYTokenizerMLP(nn.Module):
     """MLP as used in XY-Tokenizer."""
 
-    def __init__(self, config: XYTokenizerConfig):
+    def __init__(self, hidden_size, intermediate_size, dropout, activation_function):
         super().__init__()
-        self.config = config
-        self.activation_fn = ACT2FN[config.activation_function]
-        self.fc1 = nn.Linear(config.hidden_size, config.intermediate_size)
-        self.fc2 = nn.Linear(config.intermediate_size, config.hidden_size)
-        self.dropout = nn.Dropout(config.dropout)
+        self.activation_fn = ACT2FN[activation_function]
+        self.fc1 = nn.Linear(hidden_size, intermediate_size)
+        self.fc2 = nn.Linear(intermediate_size, hidden_size)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states = self.fc1(hidden_states)
@@ -329,21 +313,29 @@ class XYTokenizerMLP(nn.Module):
 class XYTokenizerTransformerLayer(nn.Module):
     """Transformer layer for XY-Tokenizer."""
 
-    def __init__(self, config: XYTokenizerConfig, is_causal: bool = False):
+    def __init__(
+        self,
+        hidden_size,
+        num_attention_heads,
+        intermediate_size,
+        activation_function,
+        dropout: float = 0.0,
+        attention_dropout: float = 0.0,
+        is_causal: bool = False,
+    ):
         super().__init__()
-        self.embed_dim = config.hidden_size
+        self.embed_dim = hidden_size
         self.self_attn = XYTokenizerAttention(
             embed_dim=self.embed_dim,
-            num_heads=config.num_attention_heads,
-            dropout=config.attention_dropout,
+            num_heads=num_attention_heads,
+            dropout=attention_dropout,
             is_causal=is_causal,
-            config=config,
         )
 
-        self.mlp = XYTokenizerMLP(config)
+        self.mlp = XYTokenizerMLP(hidden_size, intermediate_size, dropout, activation_function)
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.final_layer_norm = nn.LayerNorm(self.embed_dim)
-        self.dropout = nn.Dropout(config.dropout)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(
         self,
@@ -433,7 +425,7 @@ class OmniAudioEncoder(nn.Module):
             "positional_embedding", sinusoids(self.max_source_positions, d_model)
         )
         # Create a config object for the transformer layers
-        layer_config = XYTokenizerConfig(
+        layer_config = dict(
             hidden_size=d_model,
             num_attention_heads=encoder_attention_heads,
             intermediate_size=encoder_ffn_dim,
@@ -441,7 +433,7 @@ class OmniAudioEncoder(nn.Module):
         )
         self.layers = nn.ModuleList(
             [
-                XYTokenizerTransformerLayer(layer_config, is_causal=False)
+                XYTokenizerTransformerLayer(**layer_config, is_causal=False)
                 for _ in range(encoder_layers)
             ]
         )
@@ -520,7 +512,7 @@ class OmniAudioDecoder(nn.Module):
             "positional_embedding", sinusoids(self.max_source_positions, d_model)
         )
         # Create a config object for the transformer layers
-        layer_config = XYTokenizerConfig(
+        layer_config = dict(
             hidden_size=d_model,
             num_attention_heads=decoder_attention_heads,
             intermediate_size=decoder_ffn_dim,
@@ -528,7 +520,7 @@ class OmniAudioDecoder(nn.Module):
         )
         self.layers = nn.ModuleList(
             [
-                XYTokenizerTransformerLayer(layer_config, is_causal=False)
+                XYTokenizerTransformerLayer(**layer_config, is_causal=False)
                 for _ in range(decoder_layers)
             ]
         )
@@ -638,7 +630,7 @@ class XYTokenizerTransformer(nn.Module):
             "positional_embedding", sinusoids(self.max_source_positions, d_model)
         )
         # Create a config object for the transformer layers
-        layer_config = XYTokenizerConfig(
+        layer_config = dict(
             hidden_size=d_model,
             num_attention_heads=encoder_attention_heads,
             intermediate_size=encoder_ffn_dim,
@@ -646,7 +638,7 @@ class XYTokenizerTransformer(nn.Module):
         )
         self.layers = nn.ModuleList(
             [
-                XYTokenizerTransformerLayer(layer_config, is_causal=False)
+                XYTokenizerTransformerLayer(**layer_config, is_causal=False)
                 for _ in range(encoder_layers)
             ]
         )
@@ -1406,6 +1398,16 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
             [_get_out_len(l) for l in input_lengths], device=self.device
         )
 
+    def scale_window_size(self, boundaries, scaling_factor):
+        scaling_range = []
+        scaling_boundaries = []
+        for left_boundary, right_boundary in boundaries:
+            scaling_left_boundary = left_boundary// scaling_factor
+            scaling_right_boundary = right_boundary // scaling_factor
+            scaling_range.append(scaling_right_boundary-scaling_left_boundary)
+            scaling_boundaries.append(slice(scaling_left_boundary, scaling_right_boundary))
+        return scaling_range, scaling_boundaries
+
     @add_start_docstrings_to_model_forward(XY_TOKENIZER_INPUTS_DOCSTRING)
     @torch.no_grad()
     def encode(
@@ -1447,16 +1449,13 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
                 chunk_output = self._encode(
                     chunk_features, n_quantizers, return_dict=True
                 )
-                valid_code_lengths = (
-                    torch.clamp(
-                        chunk_features["input_lengths"], 0, features.duration_size
-                    )
-                    // self.encoder_downsample_rate
+                valid_code_lengths, valid_code_ranges = self.scale_window_size(
+                    chunk_features["input_lengths"], self.encoder_downsample_rate
                 )
 
                 # Accumulate weighted commit loss
                 chunk_length = chunk_output.codes_lengths.sum().item()
-                valid_chunk_length = valid_code_lengths.sum().item()
+                valid_chunk_length = sum(valid_code_lengths)
                 if chunk_output.commit_loss is not None and valid_chunk_length > 0:
                     commit_loss = (
                         chunk_output.commit_loss / chunk_length * valid_chunk_length
@@ -1466,18 +1465,18 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
 
                 # Group results by original sequence ID
                 for i, seq_id in enumerate(chunk_features["chunk_seq_no"].tolist()):
-                    valid_code_length = valid_code_lengths[i]
-                    if valid_code_length > 0:
+                    valid_code_range = valid_code_ranges[i]
+                    if valid_code_range.stop > 0:
                         encodings[seq_id]["zq"].append(
                             chunk_output.quantized_representation[
-                                i : i + 1, :, :valid_code_length
+                                i : i + 1, :, valid_code_range
                             ]
                         )
                         encodings[seq_id]["codes"].append(
-                            chunk_output.audio_codes[:, i : i + 1, :valid_code_length]
+                            chunk_output.audio_codes[:, i : i + 1, valid_code_range]
                         )
                         # Add the valid length of this chunk to the total for this sequence
-                        encodings[seq_id]["length"] += valid_code_lengths[i].item()
+                        encodings[seq_id]["length"] += valid_code_lengths[i]
 
             final_outputs = []
             for seq_id, seq_data in encodings.items():
@@ -1571,6 +1570,7 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
             pre_rvq_adapter_output, pre_rvq_adapter_output_length
         )
 
+        torch.save(downsample_output, "outputs/hidden1.pt")
         n_quantizers = n_quantizers or self.quantizer.num_quantizers
         zq, codes, vq_loss, _, quantizer_output_length = self.quantizer(
             downsample_output, downsample_output_length, n_quantizers=n_quantizers
@@ -1785,7 +1785,7 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
         >>> import torch
 
         >>> # This is a placeholder model name, replace with the actual one on the Hub
-        >>> model_id = "your-namespace/xy-codec-model"
+        >>> model_id = "your-namespace/xy-tokenizer-model"
         >>> model = AutoModel.from_pretrained(model_id)
         >>> # The feature extractor config is part of the model config, so it can be loaded this way
         >>> feature_extractor = AutoFeatureExtractor.from_pretrained(model_id)
@@ -1855,4 +1855,7 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
         )
 
 
-__all__ = ["XYTokenizerModel"]
+__all__ = [
+    "XYTokenizerModel",
+    "XYTokenizerPreTrainedModel",
+]
