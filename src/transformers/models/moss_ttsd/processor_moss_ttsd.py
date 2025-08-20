@@ -12,28 +12,34 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-Speech processor class for MOSS-TTSD
-"""
+"""Speech processor class for MOSS-TTSD"""
 
+import math
 import os
 import re
-import math
-import torch
-import torchaudio
-import numpy as np
-from typing import List, Union, Dict, Any, Optional, Tuple
+from typing import Any, Optional, Union
 
-from transformers import AutoTokenizer, AutoFeatureExtractor, AutoModel
+import numpy as np
+
+from transformers import AutoFeatureExtractor, AutoModel, AutoTokenizer
+
 from ...processing_utils import ProcessorMixin
 from ...tokenization_utils_base import BatchEncoding
+from ...utils import is_torch_available, is_torchaudio_available
 
 
-def process_jsonl_item(item: Dict[str, Any]) -> Dict[str, Any]:
+if is_torch_available():
+    import torch
+
+if is_torchaudio_available():
+    import torchaudio
+
+
+def process_jsonl_item(item: dict[str, Any]) -> dict[str, Any]:
     """Process JSONL data items and extract audio and text information according to the new format."""
     base_path = item.get("base_path", "")
     text = item.get("text", "")
-    
+
     prompt_audio = None
     prompt_text = ""
 
@@ -45,7 +51,7 @@ def process_jsonl_item(item: Dict[str, Any]) -> Dict[str, Any]:
         if prompt_audio_val:  # Only assign if not empty
             prompt_audio = prompt_audio_val
             prompt_text = item["prompt_text"]
-        
+
             # Only perform path joining when prompt_audio is a string path
             if isinstance(prompt_audio, str) and base_path and prompt_audio:
                 prompt_audio = os.path.join(base_path, prompt_audio)
@@ -55,28 +61,37 @@ def process_jsonl_item(item: Dict[str, Any]) -> Dict[str, Any]:
         prompt_text_speaker1 = item.get("prompt_text_speaker1", "")
         prompt_audio_speaker2 = item.get("prompt_audio_speaker2", "")
         prompt_text_speaker2 = item.get("prompt_text_speaker2", "")
-        
-        has_speaker1_audio = (isinstance(prompt_audio_speaker1, str) and prompt_audio_speaker1) or isinstance(prompt_audio_speaker1, tuple)
-        has_speaker2_audio = (isinstance(prompt_audio_speaker2, str) and prompt_audio_speaker2) or isinstance(prompt_audio_speaker2, tuple)
+
+        has_speaker1_audio = (isinstance(prompt_audio_speaker1, str) and prompt_audio_speaker1) or isinstance(
+            prompt_audio_speaker1, tuple
+        )
+        has_speaker2_audio = (isinstance(prompt_audio_speaker2, str) and prompt_audio_speaker2) or isinstance(
+            prompt_audio_speaker2, tuple
+        )
 
         if has_speaker1_audio or has_speaker2_audio:
             print("Using speaker1 and speaker2 information for prompt audio and text.")
             # Process audio: if it's a string path, perform path joining; if it's a tuple, use directly
             if isinstance(prompt_audio_speaker1, str):
-                speaker1_audio = os.path.join(base_path, prompt_audio_speaker1) if base_path and prompt_audio_speaker1 else prompt_audio_speaker1
+                speaker1_audio = (
+                    os.path.join(base_path, prompt_audio_speaker1)
+                    if base_path and prompt_audio_speaker1
+                    else prompt_audio_speaker1
+                )
             else:
                 speaker1_audio = prompt_audio_speaker1  # Use tuple directly
-                
+
             if isinstance(prompt_audio_speaker2, str):
-                speaker2_audio = os.path.join(base_path, prompt_audio_speaker2) if base_path and prompt_audio_speaker2 else prompt_audio_speaker2
+                speaker2_audio = (
+                    os.path.join(base_path, prompt_audio_speaker2)
+                    if base_path and prompt_audio_speaker2
+                    else prompt_audio_speaker2
+                )
             else:
                 speaker2_audio = prompt_audio_speaker2  # Use tuple directly
-            
-            prompt_audio = {
-                "speaker1": speaker1_audio,
-                "speaker2": speaker2_audio
-            }
-        
+
+            prompt_audio = {"speaker1": speaker1_audio, "speaker2": speaker2_audio}
+
         # Merge text
         temp_prompt_text = ""
         if prompt_text_speaker1:
@@ -84,15 +99,13 @@ def process_jsonl_item(item: Dict[str, Any]) -> Dict[str, Any]:
         if prompt_text_speaker2:
             temp_prompt_text += f"[S2]{prompt_text_speaker2}"
         prompt_text = temp_prompt_text.strip()
-    
-    return {
-        "text": text,
-        "prompt_text": prompt_text,
-        "prompt_audio": prompt_audio
-    }
+
+    return {"text": text, "prompt_text": prompt_text, "prompt_audio": prompt_audio}
 
 
-def process_audio_data(prompt_audio: Optional[Union[str, Dict[str, Any], Tuple[torch.Tensor, int]]], target_sample_rate: int = 16000) -> Optional[torch.Tensor]:
+def process_audio_data(
+    prompt_audio: Optional[Union[str, dict[str, Any], tuple[torch.Tensor, int]]], target_sample_rate: int = 16000
+) -> Optional[torch.Tensor]:
     """Load audio data and return processed audio tensor."""
     if prompt_audio is None:
         return None
@@ -107,7 +120,11 @@ def process_audio_data(prompt_audio: Optional[Union[str, Dict[str, Any], Tuple[t
         raise
 
 
-def merge_speaker_audios(wav1: Union[str, Tuple[torch.Tensor, int]], wav2: Union[str, Tuple[torch.Tensor, int]], target_sample_rate: int = 16000) -> torch.Tensor:
+def merge_speaker_audios(
+    wav1: Union[str, tuple[torch.Tensor, int]],
+    wav2: Union[str, tuple[torch.Tensor, int]],
+    target_sample_rate: int = 16000,
+) -> torch.Tensor:
     """Merge audio data from two speakers."""
     try:
         wav1 = load_audio_data(wav1, target_sample_rate)
@@ -116,36 +133,42 @@ def merge_speaker_audios(wav1: Union[str, Tuple[torch.Tensor, int]], wav2: Union
     except Exception as e:
         print(f"Error merging audio: {e}")
         raise
-        
 
-def load_audio_data(audio_input: Union[str, Tuple[torch.Tensor, int]], target_sample_rate: int = 16000) -> Tuple[torch.Tensor, int]:
+
+def load_audio_data(
+    audio_input: Union[str, tuple[torch.Tensor, int]], target_sample_rate: int = 16000
+) -> tuple[torch.Tensor, int]:
     """Load and resample audio data."""
     audio, sr = _load_single_audio(audio_input)
     return _resample_audio(audio, sr, target_sample_rate)
 
 
-def _load_single_audio(audio_input: Union[str, Tuple[torch.Tensor, int]]) -> Tuple[torch.Tensor, int]:
+def _load_single_audio(audio_input: Union[str, tuple[torch.Tensor, int]]) -> tuple[torch.Tensor, int]:
     """Load single audio file or return tuple directly."""
-    if isinstance(audio_input, tuple) and len(audio_input) == 2: 
+    if isinstance(audio_input, tuple) and len(audio_input) == 2:
         return audio_input
-    elif isinstance(audio_input, str): 
+    elif isinstance(audio_input, str):
         return torchaudio.load(audio_input)
-    else: 
+    else:
         raise ValueError(f"Unsupported audio input format: {type(audio_input)}")
-    
 
-def _resample_audio(audio_input: torch.Tensor, sampling_rate: int, target_sample_rate: int = 16000) -> Tuple[torch.Tensor, int]:
+
+def _resample_audio(
+    audio_input: torch.Tensor, sampling_rate: int, target_sample_rate: int = 16000
+) -> tuple[torch.Tensor, int]:
     """Resample audio to target sample rate and normalize channels."""
-    if sampling_rate != target_sample_rate: 
+    if sampling_rate != target_sample_rate:
         audio_input = torchaudio.functional.resample(audio_input, sampling_rate, target_sample_rate)
-    if audio_input.shape[0] > 1: 
+    if audio_input.shape[0] > 1:
         audio_input = audio_input.mean(dim=0, keepdim=True)
-    if len(audio_input.shape) == 1: 
+    if len(audio_input.shape) == 1:
         audio_input = audio_input.unsqueeze(0)
     return audio_input, target_sample_rate
 
 
-def shifting_inputs(input_ids: np.ndarray, pad_token_id: int, pad_token: int = 1024, max_channels: int = 8) -> np.ndarray:
+def shifting_inputs(
+    input_ids: np.ndarray, pad_token_id: int, pad_token: int = 1024, max_channels: int = 8
+) -> np.ndarray:
     """Shift input IDs for multi-channel processing."""
     seq_len = input_ids.shape[0]
     new_seq_len = seq_len + max_channels - 1
@@ -156,18 +179,20 @@ def shifting_inputs(input_ids: np.ndarray, pad_token_id: int, pad_token: int = 1
     return shifted_input_ids
 
 
-def shifting_outputs(output_ids: torch.Tensor, speech_token_range: List[int], max_channels: int = 8) -> torch.Tensor:
+def shifting_outputs(output_ids: torch.Tensor, speech_token_range: list[int], max_channels: int = 8) -> torch.Tensor:
     """Shift output IDs for multi-channel processing."""
     seq_len = output_ids.shape[1] - max_channels + 1
     speech_ids = torch.full((output_ids.shape[0], seq_len, max_channels), 0)
     for j in range(max_channels):
         speech_ids[..., j] = output_ids[:, j : seq_len + j, j]
-        if j == 0: 
+        if j == 0:
             speech_ids[..., j] = speech_ids[..., j] - speech_token_range[0]
     return speech_ids
 
 
-def rpadding(input_ids: List[np.ndarray], channels: int, pad_token_id: int, pad_token: int = 1024) -> Tuple[torch.Tensor, torch.Tensor]:
+def rpadding(
+    input_ids: list[np.ndarray], channels: int, pad_token_id: int, pad_token: int = 1024
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Right-pad input IDs for batch processing."""
     attention_masks = [np.ones(inputs.shape[0]) for inputs in input_ids]
     max_length = max(ids.shape[0] for ids in input_ids)
@@ -184,19 +209,19 @@ def rpadding(input_ids: List[np.ndarray], channels: int, pad_token_id: int, pad_
     return input_ids, attention_mask
 
 
-def find_max_valid_positions(data: torch.Tensor, invalid_value: int = 1024) -> List[List[torch.Tensor]]:
+def find_max_valid_positions(data: torch.Tensor, invalid_value: int = 1024) -> list[list[torch.Tensor]]:
     """Find maximum valid positions in multi-channel tensor data."""
     mask = torch.all(data[:, :, 1:] != invalid_value, dim=2)
-    
+
     valid_indices = torch.where(mask)
 
     result_tensors = [[] for _ in range(len(data))]
     if valid_indices[0].numel() == 0:
         return result_tensors
-    
+
     grouped_indices = []
     current_group = []
-    
+
     for i, seq_no in enumerate(valid_indices[0]):
         pos_id = valid_indices[1][i]
         if len(current_group) == 0 or seq_no > current_group[-1]:
@@ -210,7 +235,7 @@ def find_max_valid_positions(data: torch.Tensor, invalid_value: int = 1024) -> L
     for group_id, indices in zip(current_group, grouped_indices):
         for start_index, end_index in indices:
             result_tensors[group_id].append(data[group_id, start_index:end_index, :])
-        
+
     return result_tensors
 
 
@@ -227,17 +252,16 @@ def normalize_text(text: str) -> str:
     7. Auto-recognize [S1] / [S2] … tags; if missing, treat as whole segment.
     """
     # Replace [1], [2] etc. format with [S1], [S2] etc. format
-    text = re.sub(r'\[(\d+)\]', r'[S\1]', text)
+    text = re.sub(r"\[(\d+)\]", r"[S\1]", text)
 
     # Remove decorative characters
-    remove_chars = "【】《》（）『』「」""\"-“”～~"
-
+    remove_chars = '【】《》（）『』「」"-“”～~'
 
     # Remove brackets for non-speaker tags (keep content, only remove brackets themselves)
-    text = re.sub(r'\[(?!S\d+\])([^\]]*)\]', r'\1', text)
+    text = re.sub(r"\[(?!S\d+\])([^\]]*)\]", r"\1", text)
 
     # Use positive lookahead to split text by speaker tags (tags themselves are still preserved)
-    segments = re.split(r'(?=\[S\d+\])', text.replace("\n", " "))
+    segments = re.split(r"(?=\[S\d+\])", text.replace("\n", " "))
     normalized_lines = []
 
     for seg in segments:
@@ -246,37 +270,33 @@ def normalize_text(text: str) -> str:
             continue
 
         # Extract tags
-        m = re.match(r'^(\[S\d+\])\s*(.*)', seg)
-        tag, content = m.groups() if m else ('', seg)
+        m = re.match(r"^(\[S\d+\])\s*(.*)", seg)
+        tag, content = m.groups() if m else ("", seg)
 
         # Remove irrelevant symbols
         content = re.sub(f"[{re.escape(remove_chars)}]", "", content)
 
         # Handle consecutive "哈" characters: replace 2 or more with "(笑)"
-        content = re.sub(r'哈{2,}', '(笑)', content)
+        content = re.sub(r"哈{2,}", "(笑)", content)
 
         # Handle English laughter (e.g., "haha", "ha ha")
-        content = re.sub(r'\b(ha(\s*ha)+)\b', '(laughs)', content, flags=re.IGNORECASE)
+        content = re.sub(r"\b(ha(\s*ha)+)\b", "(laughs)", content, flags=re.IGNORECASE)
 
         # First handle multi-character punctuation marks
-        content = content.replace('——', '，')
-        content = content.replace('……', '，')
+        content = content.replace("——", "，")
+        content = content.replace("……", "，")
 
         # Handle single-character internal punctuation marks
-        internal_punct_map = str.maketrans({
-            '！': '，', '!': ',',
-            '；': '，', ';': ',',
-            '：': '，', ':': ',',
-            '、': '，', 
-            '？': '，', '?': ','
-        })
+        internal_punct_map = str.maketrans(
+            {"！": "，", "!": ",", "；": "，", ";": ",", "：": "，", ":": ",", "、": "，", "？": "，", "?": ","}
+        )
         content = content.translate(internal_punct_map)
         content = content.strip()
 
         # Keep only the final period
         if len(content) > 1:
             last_ch = "。" if content[-1] == "，" else ("." if content[-1] == "," else content[-1])
-            body = content[:-1].replace('。', '，')
+            body = content[:-1].replace("。", "，")
             content = body + last_ch
 
         normalized_lines.append(f"{tag}{content}".strip())
@@ -311,6 +331,7 @@ class MossTTSDProcessor(ProcessorMixin):
         **kwargs:
             Additional keyword arguments passed to the parent class.
     """
+
     attributes = ["tokenizer"]
     tokenizer_class = "AutoTokenizer"
 
@@ -334,10 +355,16 @@ class MossTTSDProcessor(ProcessorMixin):
         self.output_sample_rate = codec.config.output_sample_rate if codec else 16000
         self.encoder_downsample_rate = codec.config.encoder_downsample_rate if codec else 320
         self.chat_template = tokenizer.chat_template if hasattr(tokenizer, "chat_template") else chat_template
-        self.speech_token_range = tokenizer.speech_token_range if hasattr(tokenizer, "speech_token_range") else (speech_token_range or [151665, 152689])
+        self.speech_token_range = (
+            tokenizer.speech_token_range
+            if hasattr(tokenizer, "speech_token_range")
+            else (speech_token_range or [151665, 152689])
+        )
         self.audio_bos_token = tokenizer.audio_bos_token if hasattr(tokenizer, "audio_bos_token") else audio_bos_token
         self.audio_eos_token = tokenizer.audio_eos_token if hasattr(tokenizer, "audio_eos_token") else audio_eos_token
-        self.audio_pad_token_id = tokenizer.audio_pad_token_id if hasattr(tokenizer, "audio_pad_token_id") else audio_pad_token_id
+        self.audio_pad_token_id = (
+            tokenizer.audio_pad_token_id if hasattr(tokenizer, "audio_pad_token_id") else audio_pad_token_id
+        )
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs):
@@ -346,24 +373,24 @@ class MossTTSDProcessor(ProcessorMixin):
         codec_path = kwargs.pop("codec_path", os.path.join(pretrained_model_name_or_path, "XY_Tokenizer"))
         trust_remote_code = kwargs.pop("trust_remote_code", True)
         assert isinstance(codec_path, str), f"Unsupported codec_path input format: {type(codec_path)}"
-        
+
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, **kwargs)
         feature_extractor = AutoFeatureExtractor.from_pretrained(codec_path, trust_remote_code=True, **kwargs)
         codec = AutoModel.from_pretrained(codec_path, trust_remote_code=True, **kwargs)
-        
+
         return super().from_pretrained(
             pretrained_model_name_or_path,
-            tokenizer=tokenizer, 
+            tokenizer=tokenizer,
             feature_extractor=feature_extractor,
             codec=codec,
-            trust_remote_code=trust_remote_code, 
-            **kwargs
+            trust_remote_code=trust_remote_code,
+            **kwargs,
         )
-    
+
     @classmethod
     def get_processor_dict(
         cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs
-    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Get processor dictionary for loading."""
         processor_dict, kwargs = super().get_processor_dict(pretrained_model_name_or_path, **kwargs)
         processor_dict["codec"] = kwargs.pop("codec", None)
@@ -379,7 +406,7 @@ class MossTTSDProcessor(ProcessorMixin):
 
     def __call__(
         self,
-        data: Union[Dict[str, Any], List[Dict[str, Any]]],
+        data: Union[dict[str, Any], list[dict[str, Any]]],
         batch_id: int = 0,
         use_normalize: bool = False,
         padding: Union[bool, str] = True,
@@ -403,32 +430,36 @@ class MossTTSDProcessor(ProcessorMixin):
             processed_item = process_jsonl_item(item)
             text = processed_item["text"]
             prompt_text = processed_item["prompt_text"]
-            
+
             # Merge text, if prompt_text is empty, full_text is just text
             full_text = prompt_text + text if prompt_text else text
             original_full_text = full_text  # Save original text
-            
+
             # Apply text normalization based on parameter
             if use_normalize:
                 full_text = normalize_text(full_text)
-            
+
             # Replace speaker tags
             final_text = full_text.replace("[S1]", "<speaker1>").replace("[S2]", "<speaker2>")
-            
+
             # Save actual text information used
-            actual_texts_data.append({
-                "index": batch_id + i,
-                "original_text": original_full_text,
-                "normalized_text": normalize_text(original_full_text) if use_normalize else None,
-                "final_text": final_text,
-                "use_normalize": use_normalize
-            })
+            actual_texts_data.append(
+                {
+                    "index": batch_id + i,
+                    "original_text": original_full_text,
+                    "normalized_text": normalize_text(original_full_text) if use_normalize else None,
+                    "final_text": final_text,
+                    "use_normalize": use_normalize,
+                }
+            )
 
             # 2. Load audio
             audio_data = process_audio_data(processed_item["prompt_audio"])
 
             # 3. Convert to multi-channel input
-            inputs = self.process_inputs_for_processor(final_text, audio_data, system_prompt, silence_duration, **kwargs)
+            inputs = self.process_inputs_for_processor(
+                final_text, audio_data, system_prompt, silence_duration, **kwargs
+            )
             inputs = shifting_inputs(inputs, self.tokenizer.pad_token_id, max_channels=self.max_channels)
             input_ids_list.append(inputs)
 
@@ -439,13 +470,20 @@ class MossTTSDProcessor(ProcessorMixin):
             raise NotImplementedError("Unpadded batches are not supported yet.")
 
         batch = {"input_ids": input_ids, "attention_mask": attention_mask}
-        
+
         if return_tensors == "pt":
             return BatchEncoding(batch, tensor_type="pt")
-        
+
         return BatchEncoding(batch)
-    
-    def process_inputs_for_processor(self, text: str, audio_data: Optional[torch.Tensor] = None, system_prompt: Optional[str] = None, silence_duration: float = 0.0, **kwargs) -> np.ndarray:
+
+    def process_inputs_for_processor(
+        self,
+        text: str,
+        audio_data: Optional[torch.Tensor] = None,
+        system_prompt: Optional[str] = None,
+        silence_duration: float = 0.0,
+        **kwargs,
+    ) -> np.ndarray:
         """Process inputs for the processor."""
         assert isinstance(text, str), "Data format is wrong."
         if isinstance(system_prompt, str):
@@ -454,7 +492,7 @@ class MossTTSDProcessor(ProcessorMixin):
         inputs1 = np.array(self.tokenizer.encode(prompt))
         input_ids = np.full((inputs1.shape[0], self.max_channels), self.audio_pad_token_id)
         input_ids[:, 0] = inputs1
-        
+
         if audio_data is not None:
             try:
                 silence_samples = int(silence_duration * self.input_sample_rate)
@@ -478,7 +516,7 @@ class MossTTSDProcessor(ProcessorMixin):
                 raise
         return input_ids
 
-    def batch_decode(self, token_ids: torch.Tensor, *args, **kwargs) -> Tuple[List[str], List[List[torch.Tensor]]]:
+    def batch_decode(self, token_ids: torch.Tensor, *args, **kwargs) -> tuple[list[str], list[list[torch.Tensor]]]:
         """
         Decode token IDs to text and audio fragments.
 
@@ -499,17 +537,17 @@ class MossTTSDProcessor(ProcessorMixin):
         decode_audio = []
         for sequence_fragments in audio_fragments:
             if len(sequence_fragments):
-                decode_audio.append(self.codec.decode(
-                    torch.cat([
-                        fragment.permute(1, 0).unsqueeze(dim=1) for fragment in sequence_fragments
-                    ], dim=1),
-                    overlap_seconds=10
-                )["audio_values"])
+                decode_audio.append(
+                    self.codec.decode(
+                        torch.cat([fragment.permute(1, 0).unsqueeze(dim=1) for fragment in sequence_fragments], dim=1),
+                        overlap_seconds=10,
+                    )["audio_values"]
+                )
             else:
                 decode_audio.append([])
         return text, decode_audio
 
-    def decode(self, token_ids: torch.Tensor, *args, **kwargs) -> Tuple[str, torch.Tensor]:
+    def decode(self, token_ids: torch.Tensor, *args, **kwargs) -> tuple[str, torch.Tensor]:
         """
         Decode token IDs to text and audio.
 
@@ -527,9 +565,10 @@ class MossTTSDProcessor(ProcessorMixin):
         text = self.tokenizer.decode(token_ids[:, 0].squeeze(dim=-1), *args, **kwargs)
         normal_token_ids = shifting_outputs(token_ids.unsqueeze(dim=0), self.speech_token_range, self.max_channels)
         audio_fragments = find_max_valid_positions(normal_token_ids, self.audio_pad_token_id)[0]
-        audio_fragments = torch.cat(
-            [fragment.permute(1, 0).unsqueeze(dim=1) for fragment in audio_fragments], dim=1
-        )
+        audio_fragments = torch.cat([fragment.permute(1, 0).unsqueeze(dim=1) for fragment in audio_fragments], dim=1)
         decode_audio = self.codec.decode(audio_fragments, overlap_seconds=10)["audio_values"]
 
         return text, decode_audio
+
+
+__all__ = ["MossTTSDProcessor"]

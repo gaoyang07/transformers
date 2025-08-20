@@ -15,18 +15,25 @@
 """
 Feature extractor class for XY-Tokenizer
 """
-import math
-from functools import partial
-from typing import List, Optional, Union
-from collections import deque
 
-import torch
-import torch.nn.functional as F
-from transformers import WhisperFeatureExtractor
-from transformers.audio_utils import mel_filter_bank
-from transformers.configuration_utils import PretrainedConfig
-from transformers.feature_extraction_utils import BatchFeature
-from transformers.utils import TensorType, logging
+import math
+from collections import deque
+from functools import partial
+from typing import Optional, Union
+
+from ...audio_utils import mel_filter_bank
+from ...feature_extraction_utils import BatchFeature
+from ...models.whisper.feature_extraction_whisper import WhisperFeatureExtractor
+from ...utils import TensorType, is_torch_available, is_torchaudio_available, logging
+
+
+if is_torch_available():
+    import torch
+    import torch.nn.functional as F
+
+if is_torchaudio_available():
+    pass
+
 
 logger = logging.get_logger(__name__)
 
@@ -53,9 +60,9 @@ class ExtractorIterator:
         self.chunk_size = int(self.chunk_length * self.sampling_rate)
         self.overlap_size = int(self.overlap_seconds * self.sampling_rate)
         self.duration_size = self.chunk_size - self.overlap_size
-        assert (
-            (overlap_side == "right") or (self.overlap_size % 2 == 0)
-        ), '`overlap_seconds` must be divisible by 2 when `overlap_side` is "both".'
+        assert (overlap_side == "right") or (self.overlap_size % 2 == 0), (
+            '`overlap_seconds` must be divisible by 2 when `overlap_side` is "both".'
+        )
         # Note: here we only process non-overlapping blocks, and overlap will be processed outside (if needed)
         # or more explicitly in the iterator. For simplicity, we assume that the blocks are based on duration_size
 
@@ -73,7 +80,7 @@ class ExtractorIterator:
         wav_tensor = torch.zeros(self.batch_size, 1, self.chunk_size)
         input_lengths = deque(maxlen=self.batch_size)
         input_seq_no = torch.zeros(self.batch_size, dtype=torch.long)
-        
+
         right_boundary = self.get_right_boundary()
 
         for i, sample in enumerate(self.data):
@@ -82,9 +89,7 @@ class ExtractorIterator:
             processed_in_sample = 0
             while processed_in_sample < len(sample_chunks):
                 space_in_batch = self.batch_size - batch_num
-                chunks_to_add = min(
-                    space_in_batch, len(sample_chunks) - processed_in_sample
-                )
+                chunks_to_add = min(space_in_batch, len(sample_chunks) - processed_in_sample)
 
                 # Define slice range
                 start_idx_sample = processed_in_sample
@@ -93,13 +98,9 @@ class ExtractorIterator:
                 end_idx_batch = batch_num + chunks_to_add
 
                 # Fill data
-                wav_tensor[start_idx_batch:end_idx_batch] = sample_chunks[
-                    start_idx_sample:end_idx_sample
-                ]
+                wav_tensor[start_idx_batch:end_idx_batch] = sample_chunks[start_idx_sample:end_idx_sample]
                 input_lengths.extend(sample_lengths[start_idx_sample:end_idx_sample])
-                input_seq_no[start_idx_batch:end_idx_batch] = sample_seq_no[
-                    start_idx_sample:end_idx_sample
-                ]
+                input_seq_no[start_idx_batch:end_idx_batch] = sample_seq_no[start_idx_sample:end_idx_sample]
 
                 # Update counter
                 batch_num += chunks_to_add
@@ -109,14 +110,10 @@ class ExtractorIterator:
                 if batch_num == self.batch_size:
                     list_x = []
                     for xi, (_, right) in enumerate(input_lengths):
-                        if right == right_boundary and torch.any(
-                            wav_tensor[xi, :, right:] != 0
-                        ):
+                        if right == right_boundary and torch.any(wav_tensor[xi, :, right:] != 0):
                             list_x.append(wav_tensor[xi].reshape(-1).cpu().numpy())
                         else:
-                            list_x.append(
-                                wav_tensor[xi, :, :right].reshape(-1).cpu().numpy()
-                            )
+                            list_x.append(wav_tensor[xi, :, :right].reshape(-1).cpu().numpy())
                     yield BatchFeature(
                         {
                             **self.encode_func(list_x),
@@ -136,14 +133,10 @@ class ExtractorIterator:
             list_x = []
             for xi in range(batch_num):
                 _, right = input_lengths[xi]
-                if right == right_boundary and torch.any(
-                    wav_tensor[xi, :, right:] != 0
-                ):
+                if right == right_boundary and torch.any(wav_tensor[xi, :, right:] != 0):
                     list_x.append(wav_tensor[xi].reshape(-1).cpu().numpy())
                 else:
-                    list_x.append(
-                        wav_tensor[xi, :, :right].reshape(-1).cpu().numpy()
-                    )
+                    list_x.append(wav_tensor[xi, :, :right].reshape(-1).cpu().numpy())
             yield BatchFeature(
                 {
                     **self.encode_func(list_x),
@@ -154,21 +147,17 @@ class ExtractorIterator:
 
     def chunk_and_pad_view(self, tensor, seq_no):
         x = tensor[0:1, :].unsqueeze(0)
-        
+
         stride = self.duration_size
         kernel = self.chunk_size
         B, C, L = x.shape
-    
+
         num_chunks = max(0, math.ceil((L - kernel) / stride)) + 1
         target_len = (num_chunks - 1) * stride + kernel
         padding_size = max(0, target_len - L)
         x_padded = F.pad(x, (0, padding_size), "constant", 0)
-        output_tensor = (
-            x_padded.unfold(dimension=2, size=kernel, step=stride)
-            .squeeze(0)
-            .transpose(0, 1)
-        )
-        
+        output_tensor = x_padded.unfold(dimension=2, size=kernel, step=stride).squeeze(0).transpose(0, 1)
+
         output_lengths = self.get_windows_boundaries(num_chunks, L)
         output_seq_no = torch.full((num_chunks,), seq_no, dtype=torch.long)
         return output_tensor, output_lengths, output_seq_no
@@ -184,16 +173,14 @@ class ExtractorIterator:
             return self.duration_size
         else:
             return self.chunk_size - int(self.overlap_size / 2)
-            
+
     def get_windows_boundaries(self, num_chunks, seq_len):
         left_boundary = self.get_left_boundary()
         right_boundary = self.get_right_boundary()
 
         output_lengths = [(left_boundary, right_boundary) for _ in range(num_chunks)]
         output_lengths[0] = (0, output_lengths[0][1])
-        output_lengths[-1] = (
-            output_lengths[-1][0], seq_len - self.duration_size * (num_chunks-1)
-        )
+        output_lengths[-1] = (output_lengths[-1][0], seq_len - self.duration_size * (num_chunks - 1))
         return output_lengths
 
 
@@ -213,7 +200,7 @@ class XYTokenizerFeatureExtractor(WhisperFeatureExtractor):
         return_attention_mask=False,
         max_frequency=None,
         batch_size=8,
-        overlap_side="both", 
+        overlap_side="both",
         **kwargs,
     ):
         super().__init__(
@@ -230,9 +217,7 @@ class XYTokenizerFeatureExtractor(WhisperFeatureExtractor):
             padding_side=padding_side,
             **kwargs,
         )
-        self.max_frequency = (
-            max_frequency if max_frequency is not None else sampling_rate / 2
-        )
+        self.max_frequency = max_frequency if max_frequency is not None else sampling_rate / 2
         self.batch_size = batch_size
         self.mel_filters = mel_filter_bank(
             num_frequency_bins=1 + n_fft // 2,
@@ -247,7 +232,7 @@ class XYTokenizerFeatureExtractor(WhisperFeatureExtractor):
 
     def __call__(
         self,
-        raw_speech: Union[torch.Tensor, List[torch.Tensor]],
+        raw_speech: Union[torch.Tensor, list[torch.Tensor]],
         truncation: bool = True,
         pad_to_multiple_of: Optional[int] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
@@ -261,13 +246,12 @@ class XYTokenizerFeatureExtractor(WhisperFeatureExtractor):
         overlap_seconds: int = 10,
         **kwargs,
     ) -> ExtractorIterator:
-
         if not isinstance(raw_speech, list):
             raw_speech = [raw_speech]
 
         return ExtractorIterator(
             raw_speech,
-            batch_size=self.batch_size if self.batch_size else len(raw_speech), 
+            batch_size=self.batch_size if self.batch_size else len(raw_speech),
             chunk_length=self.chunk_length,
             overlap_seconds=overlap_seconds,
             overlap_side=self.overlap_side,

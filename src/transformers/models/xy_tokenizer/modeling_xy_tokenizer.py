@@ -17,24 +17,27 @@
 import math
 from collections import defaultdict
 from dataclasses import asdict, dataclass
-from typing import List, Optional, Tuple, Union
+from typing import Optional, Union
 
 import numpy as np
-import torch
-import torch.distributed as dist
-import torch.nn as nn
-import torch.nn.functional as F
 from einops import rearrange
-from torch.nn.utils.parametrizations import weight_norm
 
 from ...activations import ACT2FN
 from ...feature_extraction_utils import BatchFeature
 from ...modeling_attn_mask_utils import _prepare_4d_attention_mask
 from ...modeling_outputs import ModelOutput
 from ...modeling_utils import PreTrainedModel
-from ...utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging
+from ...utils import add_start_docstrings, add_start_docstrings_to_model_forward, is_torch_available, logging
 from .configuration_xy_tokenizer import XYTokenizerConfig
 from .feature_extraction_xy_tokenizer import ExtractorIterator, XYTokenizerFeatureExtractor
+
+
+if is_torch_available():
+    import torch
+    import torch.distributed as dist
+    import torch.nn as nn
+    import torch.nn.functional as F
+    from torch.nn.utils.parametrizations import weight_norm
 
 logger = logging.get_logger(__name__)
 
@@ -132,10 +135,7 @@ def sinusoids(length, channels, max_timescale=10000, device=None):
     assert channels % 2 == 0
     log_timescale_increment = np.log(max_timescale) / (channels // 2 - 1)
     inv_timescales = torch.exp(-log_timescale_increment * torch.arange(channels // 2))
-    scaled_time = (
-        torch.arange(length, device=device)[:, np.newaxis]
-        * inv_timescales[np.newaxis, :]
-    )
+    scaled_time = torch.arange(length, device=device)[:, np.newaxis] * inv_timescales[np.newaxis, :]
     return torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)], dim=1)
 
 
@@ -145,9 +145,7 @@ def get_sequence_mask(inputs, inputs_length):
     else:
         bsz, tgt_len = inputs_length.shape[0], torch.max(inputs_length)
     sequence_mask = torch.arange(0, tgt_len, device=inputs.device)
-    sequence_mask = torch.lt(sequence_mask, inputs_length.reshape(bsz, 1)).view(
-        bsz, tgt_len, 1
-    )
+    sequence_mask = torch.lt(sequence_mask, inputs_length.reshape(bsz, 1)).view(bsz, tgt_len, 1)
     return sequence_mask
 
 
@@ -216,7 +214,7 @@ class XYTokenizerAttention(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         seq_len: Optional[torch.Tensor] = None,
         output_attentions: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Input shape: Batch x Time x Channel"""
         bsz, tgt_len, _ = hidden_states.size()
 
@@ -241,7 +239,7 @@ class XYTokenizerAttention(nn.Module):
 
         # Initialize length_mask as None
         length_mask = None
-        
+
         # Create attention mask based on sequence lengths if provided
         if seq_len is not None:
             # Apply causal mask if needed
@@ -263,7 +261,7 @@ class XYTokenizerAttention(nn.Module):
             attn_weights = attn_weights * length_mask
 
         if output_attentions:
-            # this operation is a bit awkward, but it's the only way to 
+            # this operation is a bit awkward, but it's the only way to
             # reuse the parameterized conditioning apply_rotary_pos_emb
             attn_weights_reshaped = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
             attn_weights = attn_weights_reshaped.view(bsz * self.num_heads, tgt_len, src_len)
@@ -343,7 +341,7 @@ class XYTokenizerTransformerLayer(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         seq_len: Optional[torch.Tensor] = None,
         output_attentions: bool = False,
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+    ) -> tuple[torch.FloatTensor, Optional[tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
         Args:
             hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
@@ -376,9 +374,7 @@ class XYTokenizerTransformerLayer(nn.Module):
         if hidden_states.dtype in [torch.float16, torch.bfloat16]:
             if torch.isinf(hidden_states).any() or torch.isnan(hidden_states).any():
                 clamp_value = torch.finfo(hidden_states.dtype).max - 1000
-                hidden_states = torch.clamp(
-                    hidden_states, min=-clamp_value, max=clamp_value
-                )
+                hidden_states = torch.clamp(hidden_states, min=-clamp_value, max=clamp_value)
 
         outputs = (hidden_states,)
 
@@ -406,36 +402,25 @@ class OmniAudioEncoder(nn.Module):
         attn_type="varlen",
     ):
         super().__init__()
-        self.max_source_positions = (
-            max_audio_seconds * sampling_rate // hop_length
-        ) // stride_size
+        self.max_source_positions = (max_audio_seconds * sampling_rate // hop_length) // stride_size
         self.embed_scale = math.sqrt(d_model) if scale_embedding else 1.0
         self.num_mel_bins, self.d_model, self.stride_size = (
             num_mel_bins,
             d_model,
             stride_size,
         )
-        self.conv1 = nn.Conv1d(
-            num_mel_bins, d_model, kernel_size=kernel_size, padding=1
-        )
-        self.conv2 = nn.Conv1d(
-            d_model, d_model, kernel_size=kernel_size, stride=stride_size, padding=1
-        )
-        self.register_buffer(
-            "positional_embedding", sinusoids(self.max_source_positions, d_model)
-        )
+        self.conv1 = nn.Conv1d(num_mel_bins, d_model, kernel_size=kernel_size, padding=1)
+        self.conv2 = nn.Conv1d(d_model, d_model, kernel_size=kernel_size, stride=stride_size, padding=1)
+        self.register_buffer("positional_embedding", sinusoids(self.max_source_positions, d_model))
         # Create a config object for the transformer layers
-        layer_config = dict(
-            hidden_size=d_model,
-            num_attention_heads=encoder_attention_heads,
-            intermediate_size=encoder_ffn_dim,
-            activation_function=activation_function,
-        )
+        layer_config = {
+            "hidden_size": d_model,
+            "num_attention_heads": encoder_attention_heads,
+            "intermediate_size": encoder_ffn_dim,
+            "activation_function": activation_function,
+        }
         self.layers = nn.ModuleList(
-            [
-                XYTokenizerTransformerLayer(**layer_config, is_causal=False)
-                for _ in range(encoder_layers)
-            ]
+            [XYTokenizerTransformerLayer(**layer_config, is_causal=False) for _ in range(encoder_layers)]
         )
         self.layer_norm = nn.LayerNorm(d_model)
 
@@ -451,9 +436,7 @@ class OmniAudioEncoder(nn.Module):
             if tgt_len < self.positional_embedding.shape[0]
             else self.positional_embedding
         )
-        hidden_states = (hidden_states.to(torch.float32) + pos_embed).to(
-            hidden_states.dtype
-        )
+        hidden_states = (hidden_states.to(torch.float32) + pos_embed).to(hidden_states.dtype)
         attention_mask = get_sequence_mask(hidden_states, output_length)
         all_hidden = () if output_hidden_states else None
         for layer in self.layers:
@@ -493,36 +476,25 @@ class OmniAudioDecoder(nn.Module):
         attn_type="varlen",
     ):
         super().__init__()
-        self.max_source_positions = (
-            max_audio_seconds * sampling_rate // hop_length
-        ) // stride_size
+        self.max_source_positions = (max_audio_seconds * sampling_rate // hop_length) // stride_size
         self.embed_scale = math.sqrt(d_model) if scale_embedding else 1.0
         self.num_mel_bins, self.d_model, self.stride_size = (
             num_mel_bins,
             d_model,
             stride_size,
         )
-        self.deconv1 = nn.ConvTranspose1d(
-            d_model, d_model, kernel_size, stride_size, padding=0, output_padding=0
-        )
-        self.deconv2 = nn.ConvTranspose1d(
-            d_model, num_mel_bins, kernel_size, stride=1, padding=0
-        )
-        self.register_buffer(
-            "positional_embedding", sinusoids(self.max_source_positions, d_model)
-        )
+        self.deconv1 = nn.ConvTranspose1d(d_model, d_model, kernel_size, stride_size, padding=0, output_padding=0)
+        self.deconv2 = nn.ConvTranspose1d(d_model, num_mel_bins, kernel_size, stride=1, padding=0)
+        self.register_buffer("positional_embedding", sinusoids(self.max_source_positions, d_model))
         # Create a config object for the transformer layers
-        layer_config = dict(
-            hidden_size=d_model,
-            num_attention_heads=decoder_attention_heads,
-            intermediate_size=decoder_ffn_dim,
-            activation_function=activation_function,
-        )
+        layer_config = {
+            "hidden_size": d_model,
+            "num_attention_heads": decoder_attention_heads,
+            "intermediate_size": decoder_ffn_dim,
+            "activation_function": activation_function,
+        }
         self.layers = nn.ModuleList(
-            [
-                XYTokenizerTransformerLayer(**layer_config, is_causal=False)
-                for _ in range(decoder_layers)
-            ]
+            [XYTokenizerTransformerLayer(**layer_config, is_causal=False) for _ in range(decoder_layers)]
         )
         self.layer_norm = nn.LayerNorm(d_model)
 
@@ -534,9 +506,7 @@ class OmniAudioDecoder(nn.Module):
             if tgt_len < self.positional_embedding.shape[0]
             else self.positional_embedding
         )
-        hidden_states = (hidden_states.to(torch.float32) + pos_embed).to(
-            hidden_states.dtype
-        )
+        hidden_states = (hidden_states.to(torch.float32) + pos_embed).to(hidden_states.dtype)
         attention_mask = get_sequence_mask(hidden_states, input_length)
         for layer in self.layers:
             layer_outputs = layer(
@@ -562,15 +532,9 @@ class ResidualDownConv(nn.Module):
         super().__init__()
         self.d_model, self.avg_pooler = d_model, avg_pooler
         self.intermediate_dim = d_model * avg_pooler
-        self.gate_proj = nn.Conv1d(
-            d_model, self.intermediate_dim, avg_pooler, avg_pooler, bias=False
-        )
-        self.up_proj = nn.Conv1d(
-            d_model, self.intermediate_dim, avg_pooler, avg_pooler, bias=False
-        )
-        self.down_proj = nn.Linear(
-            self.intermediate_dim, self.intermediate_dim, bias=False
-        )
+        self.gate_proj = nn.Conv1d(d_model, self.intermediate_dim, avg_pooler, avg_pooler, bias=False)
+        self.up_proj = nn.Conv1d(d_model, self.intermediate_dim, avg_pooler, avg_pooler, bias=False)
+        self.down_proj = nn.Linear(self.intermediate_dim, self.intermediate_dim, bias=False)
         self.act_fn = ACT2FN["silu"]
         self.layer_norm = nn.LayerNorm(self.intermediate_dim)
 
@@ -593,9 +557,7 @@ class UpConv(nn.Module):
     def __init__(self, d_model=1280, stride=4):
         super().__init__()
         self.d_model, self.stride = d_model, stride
-        self.up_conv = nn.ConvTranspose1d(
-            self.stride * d_model, d_model, stride, stride, bias=False
-        )
+        self.up_conv = nn.ConvTranspose1d(self.stride * d_model, d_model, stride, stride, bias=False)
 
     def forward(self, x, input_length):
         res = self.up_conv(x)
@@ -623,37 +585,24 @@ class XYTokenizerTransformer(nn.Module):
             output_dim,
             max_source_positions,
         )
-        self.proj = (
-            nn.Linear(input_dim, d_model, bias=True) if input_dim != d_model else None
-        )
-        self.register_buffer(
-            "positional_embedding", sinusoids(self.max_source_positions, d_model)
-        )
+        self.proj = nn.Linear(input_dim, d_model, bias=True) if input_dim != d_model else None
+        self.register_buffer("positional_embedding", sinusoids(self.max_source_positions, d_model))
         # Create a config object for the transformer layers
-        layer_config = dict(
-            hidden_size=d_model,
-            num_attention_heads=encoder_attention_heads,
-            intermediate_size=encoder_ffn_dim,
-            activation_function=activation_function,
-        )
+        layer_config = {
+            "hidden_size": d_model,
+            "num_attention_heads": encoder_attention_heads,
+            "intermediate_size": encoder_ffn_dim,
+            "activation_function": activation_function,
+        }
         self.layers = nn.ModuleList(
-            [
-                XYTokenizerTransformerLayer(**layer_config, is_causal=False)
-                for _ in range(encoder_layers)
-            ]
+            [XYTokenizerTransformerLayer(**layer_config, is_causal=False) for _ in range(encoder_layers)]
         )
         self.layer_norm = nn.LayerNorm(d_model)
-        self.out_proj = (
-            nn.Linear(d_model, output_dim, bias=True) if output_dim != d_model else None
-        )
+        self.out_proj = nn.Linear(d_model, output_dim, bias=True) if output_dim != d_model else None
 
     def forward(self, input_features, input_length, output_hidden_states=False):
         output_length = input_length.long()
-        hidden_states = (
-            self.proj(input_features.permute(0, 2, 1)).permute(0, 2, 1)
-            if self.proj
-            else input_features
-        )
+        hidden_states = self.proj(input_features.permute(0, 2, 1)).permute(0, 2, 1) if self.proj else input_features
         hidden_states = hidden_states.permute(0, 2, 1)
         bsz, tgt_len, _ = hidden_states.size()
         pos_embed = (
@@ -661,9 +610,7 @@ class XYTokenizerTransformer(nn.Module):
             if tgt_len < self.positional_embedding.shape[0]
             else self.positional_embedding
         )
-        hidden_states = (hidden_states.to(torch.float32) + pos_embed).to(
-            hidden_states.dtype
-        )
+        hidden_states = (hidden_states.to(torch.float32) + pos_embed).to(hidden_states.dtype)
         attention_mask = get_sequence_mask(hidden_states, output_length)
         all_hidden = () if output_hidden_states else None
         for layer in self.layers:
@@ -681,9 +628,7 @@ class XYTokenizerTransformer(nn.Module):
             all_hidden += (hidden_states,)
         hidden_states = torch.where(attention_mask, hidden_states, 0).transpose(1, 2)
         if self.out_proj:
-            hidden_states = self.out_proj(hidden_states.permute(0, 2, 1)).permute(
-                0, 2, 1
-            )
+            hidden_states = self.out_proj(hidden_states.permute(0, 2, 1)).permute(0, 2, 1)
         if not output_hidden_states:
             return hidden_states, output_length
         return hidden_states, output_length, all_hidden
@@ -695,9 +640,7 @@ class XYTokenizerTransformer(nn.Module):
 # The code below will assume these classes are defined in the current scope.
 # ... [Paste all other helper classes here] ...
 class ISTFT(nn.Module):
-    def __init__(
-        self, n_fft: int, hop_length: int, win_length: int, padding: str = "same"
-    ):
+    def __init__(self, n_fft: int, hop_length: int, win_length: int, padding: str = "same"):
         super().__init__()
         if padding not in ["center", "same"]:
             raise ValueError("Padding must be 'center' or 'same'.")
@@ -724,15 +667,10 @@ class ISTFT(nn.Module):
         else:
             raise ValueError("Padding must be 'center' or 'same'.")
         B, N, T = spec.shape
-        ifft = (
-            torch.fft.irfft(spec, self.n_fft, dim=1, norm="backward")
-            * self.window[None, :, None]
-        )
+        ifft = torch.fft.irfft(spec, self.n_fft, dim=1, norm="backward") * self.window[None, :, None]
         output_size = (T - 1) * self.hop_length + self.win_length
 
-        y = F.fold(
-            ifft, (1, output_size), (1, self.win_length), stride=(1, self.hop_length)
-        )[:, 0, 0, pad:-pad]
+        y = F.fold(ifft, (1, output_size), (1, self.win_length), stride=(1, self.hop_length))[:, 0, 0, pad:-pad]
         window_sq = self.window.square().expand(1, T, -1).transpose(1, 2)
         window_envelope = torch.nn.functional.fold(
             window_sq,
@@ -779,17 +717,11 @@ class AdaLayerNorm(nn.Module):
 
 
 class ConvNeXtBlock(nn.Module):
-    def __init__(
-        self, dim, intermediate_dim, layer_scale_init_value, adanorm_num_embeddings=None
-    ):
+    def __init__(self, dim, intermediate_dim, layer_scale_init_value, adanorm_num_embeddings=None):
         super().__init__()
         self.dwconv = nn.Conv1d(dim, dim, 7, 1, 3, groups=dim)
         self.adanorm = adanorm_num_embeddings is not None
-        self.norm = (
-            AdaLayerNorm(adanorm_num_embeddings, dim)
-            if self.adanorm
-            else nn.LayerNorm(dim, eps=1e-6)
-        )
+        self.norm = AdaLayerNorm(adanorm_num_embeddings, dim) if self.adanorm else nn.LayerNorm(dim, eps=1e-6)
         self.pwconv1 = nn.Linear(dim, intermediate_dim)
         self.act = nn.GELU()
         self.pwconv2 = nn.Linear(intermediate_dim, dim)
@@ -826,15 +758,9 @@ class VocosBackbone(Backbone):
         adanorm_num_embeddings=None,
     ):
         super().__init__()
-        self.input_channels, self.embed = input_channels, nn.Conv1d(
-            input_channels, dim, 7, 1, 3
-        )
+        self.input_channels, self.embed = input_channels, nn.Conv1d(input_channels, dim, 7, 1, 3)
         self.adanorm = adanorm_num_embeddings is not None
-        self.norm = (
-            AdaLayerNorm(adanorm_num_embeddings, dim)
-            if self.adanorm
-            else nn.LayerNorm(dim, eps=1e-6)
-        )
+        self.norm = AdaLayerNorm(adanorm_num_embeddings, dim) if self.adanorm else nn.LayerNorm(dim, eps=1e-6)
         self.convnext = nn.ModuleList(
             [
                 ConvNeXtBlock(
@@ -967,23 +893,11 @@ class VectorQuantize(nn.Module):
             threshold_ema_dead,
         )
         self.kmeans_init, self.kmeans_iters = kmeans_init, kmeans_iters
-        self.in_project = (
-            WNConv1d(input_dim, codebook_dim, 1)
-            if input_dim != codebook_dim
-            else nn.Identity()
-        )
-        self.out_project = (
-            WNConv1d(codebook_dim, input_dim, 1)
-            if codebook_dim != input_dim
-            else nn.Identity()
-        )
+        self.in_project = WNConv1d(input_dim, codebook_dim, 1) if input_dim != codebook_dim else nn.Identity()
+        self.out_project = WNConv1d(codebook_dim, input_dim, 1) if codebook_dim != input_dim else nn.Identity()
         self.register_buffer(
             "codebook",
-            (
-                torch.zeros(codebook_size, codebook_dim)
-                if kmeans_init
-                else torch.randn(codebook_size, codebook_dim)
-            ),
+            (torch.zeros(codebook_size, codebook_dim) if kmeans_init else torch.randn(codebook_size, codebook_dim)),
         )
         self.register_buffer("inited", torch.tensor(not kmeans_init, dtype=torch.bool))
         self.register_buffer("cluster_size", torch.zeros(codebook_size))
@@ -1016,21 +930,18 @@ class VectorQuantize(nn.Module):
             )
             if dist.is_initialized():
                 dist.broadcast(samples, src=0)
-            self.codebook[dead_mask] = samples[: dead_mask.sum()].to(
-                self.codebook.dtype
-            )
+            self.codebook[dead_mask] = samples[: dead_mask.sum()].to(self.codebook.dtype)
 
     def init_codebook(self, encodings):
         if self.inited.item():
             return
         if not dist.is_initialized() or dist.get_rank() == 0:
-            embed, cluster_sizes = kmeans(
-                encodings.float(), self.codebook_size, self.kmeans_iters
-            )
+            embed, cluster_sizes = kmeans(encodings.float(), self.codebook_size, self.kmeans_iters)
         else:
-            embed, cluster_sizes = torch.zeros(
-                self.codebook_size, self.codebook_dim, device=encodings.device
-            ), torch.zeros(self.codebook_size, device=encodings.device)
+            embed, cluster_sizes = (
+                torch.zeros(self.codebook_size, self.codebook_dim, device=encodings.device),
+                torch.zeros(self.codebook_size, device=encodings.device),
+            )
         if dist.is_initialized():
             dist.broadcast(embed, src=0)
             dist.broadcast(cluster_sizes, src=0)
@@ -1051,10 +962,7 @@ class VectorQuantize(nn.Module):
         )
         indices = rearrange((-dist).max(1)[1], "(b t) -> b t", b=z.size(0))
         z_q = self.decode_code(indices)
-        commit_loss = (
-            F.mse_loss(z_e, z_q.detach(), reduction="none").mean([1, 2])
-            * self.commitment
-        )
+        commit_loss = F.mse_loss(z_e, z_q.detach(), reduction="none").mean([1, 2]) * self.commitment
         if self.training and torch.is_grad_enabled():
             self.ema_update(encodings, F.one_hot(indices.view(-1), self.codebook_size))
             self.replace_dead_codes(encodings)
@@ -1091,14 +999,8 @@ class ResidualVQ(nn.Module):
             codebook_dim,
         )
         self.quantizer_dropout, self.skip_rvq_ratio = quantizer_dropout, skip_rvq_ratio
-        self.input_proj = (
-            WNConv1d(input_dim, rvq_dim, 1) if input_dim != rvq_dim else nn.Identity()
-        )
-        self.output_proj = (
-            WNConv1d(rvq_dim, self.output_dim, 1)
-            if rvq_dim != self.output_dim
-            else nn.Identity()
-        )
+        self.input_proj = WNConv1d(input_dim, rvq_dim, 1) if input_dim != rvq_dim else nn.Identity()
+        self.output_proj = WNConv1d(rvq_dim, self.output_dim, 1) if rvq_dim != self.output_dim else nn.Identity()
         if vq_config is None:
             vq_config = VectorQuantizerConfig()
         quantizer_kwargs = asdict(vq_config)
@@ -1107,9 +1009,7 @@ class ResidualVQ(nn.Module):
             kwargs.pop(key, None)
         self.quantizers = nn.ModuleList(
             [
-                VectorQuantize(
-                    rvq_dim, codebook_size, codebook_dim, **quantizer_kwargs, **kwargs
-                )
+                VectorQuantize(rvq_dim, codebook_size, codebook_dim, **quantizer_kwargs, **kwargs)
                 for _ in range(num_quantizers)
             ]
         )
@@ -1120,9 +1020,7 @@ class ResidualVQ(nn.Module):
         with torch.autocast("cuda", enabled=False):
             batch_size, _, max_time = z.shape
             device = z.device
-            mask = torch.arange(max_time, device=device).expand(
-                batch_size, max_time
-            ) < input_length.unsqueeze(1)
+            mask = torch.arange(max_time, device=device).expand(batch_size, max_time) < input_length.unsqueeze(1)
 
             quantized_out = torch.zeros_like(z)
             residual = z.clone().float()
@@ -1137,11 +1035,7 @@ class ResidualVQ(nn.Module):
             skip_mask = self._get_skip_mask(batch_size, device)
             # --- Complexity Reduction End ---
 
-            max_q_to_run = (
-                self.num_quantizers
-                if self.training
-                else (n_quantizers or self.num_quantizers)
-            )
+            max_q_to_run = self.num_quantizers if self.training else (n_quantizers or self.num_quantizers)
 
             for i, quantizer in enumerate(self.quantizers[:max_q_to_run]):
                 # Create a mask for which batch items are active in this iteration
@@ -1152,11 +1046,7 @@ class ResidualVQ(nn.Module):
                     # If no items are active, we can add placeholders and continue
                     # This branch is less common but handles the case where all items have dropped out
                     all_commit_losses.append(torch.tensor(0.0, device=device))
-                    all_indices.append(
-                        torch.zeros(
-                            batch_size, max_time, dtype=torch.long, device=device
-                        )
-                    )
+                    all_indices.append(torch.zeros(batch_size, max_time, dtype=torch.long, device=device))
                     all_quantized.append(torch.zeros_like(z))
                     continue
 
@@ -1164,15 +1054,11 @@ class ResidualVQ(nn.Module):
 
                 # --- Complexity Reduction Start ---
                 # 2. Extracted quantization step logic
-                z_q_i, commit_loss_i, indices_i = self._quantize_step(
-                    quantizer, masked_residual, skip_mask
-                )
+                z_q_i, commit_loss_i, indices_i = self._quantize_step(quantizer, masked_residual, skip_mask)
                 # --- Complexity Reduction End ---
 
                 # Create a mask for updating tensors (batch items active in this iteration AND within valid length)
-                update_mask = active_in_iteration_mask.view(-1, 1, 1) & mask.unsqueeze(
-                    1
-                )
+                update_mask = active_in_iteration_mask.view(-1, 1, 1) & mask.unsqueeze(1)
 
                 quantized_out += z_q_i * update_mask
                 residual -= z_q_i * update_mask
@@ -1193,10 +1079,7 @@ class ResidualVQ(nn.Module):
             if num_loops_done < self.num_quantizers:
                 remaining = self.num_quantizers - num_loops_done
                 all_commit_losses.extend([torch.tensor(0.0, device=device)] * remaining)
-                all_indices.extend(
-                    [torch.zeros(batch_size, max_time, dtype=torch.long, device=device)]
-                    * remaining
-                )
+                all_indices.extend([torch.zeros(batch_size, max_time, dtype=torch.long, device=device)] * remaining)
                 all_quantized.extend([torch.zeros_like(z)] * remaining)
 
         quantized_out = self.output_proj(quantized_out)
@@ -1242,16 +1125,12 @@ class ResidualVQ(nn.Module):
         n_dropout = int(batch_size * self.quantizer_dropout)
         if n_dropout > 0:
             dropout_indices = torch.randperm(batch_size, device=device)[:n_dropout]
-            dropout_values = torch.randint(
-                1, self.num_quantizers + 1, (n_dropout,), device=device
-            )
+            dropout_values = torch.randint(1, self.num_quantizers + 1, (n_dropout,), device=device)
             n_q_tensor[dropout_indices] = dropout_values
 
         return n_q_tensor
 
-    def _get_skip_mask(
-        self, batch_size: int, device: torch.device
-    ) -> Optional[torch.Tensor]:
+    def _get_skip_mask(self, batch_size: int, device: torch.device) -> Optional[torch.Tensor]:
         """Generates a mask for skipping RVQ during training if skip_rvq_ratio > 0."""
         is_training = self.training and torch.is_grad_enabled()
         if not is_training or self.skip_rvq_ratio <= 0:
@@ -1274,9 +1153,7 @@ class ResidualVQ(nn.Module):
             # and the loss is zero.
             skip_mask_expanded = skip_mask.view(-1, 1, 1)
             z_q_i = torch.where(skip_mask_expanded, residual, z_q_i)
-            commit_loss_i = torch.where(
-                skip_mask, torch.zeros_like(commit_loss_i), commit_loss_i
-            )
+            commit_loss_i = torch.where(skip_mask, torch.zeros_like(commit_loss_i), commit_loss_i)
 
         return z_q_i, commit_loss_i, indices_i
 
@@ -1364,9 +1241,7 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
 
         params = config.params
         self.semantic_encoder = OmniAudioEncoder(**params["semantic_encoder_kwargs"])
-        self.semantic_encoder_adapter = XYTokenizerTransformer(
-            **params["semantic_encoder_adapter_kwargs"]
-        )
+        self.semantic_encoder_adapter = XYTokenizerTransformer(**params["semantic_encoder_adapter_kwargs"])
         self.acoustic_encoder = OmniAudioEncoder(**params["acoustic_encoder_kwargs"])
         self.pre_rvq_adapter = XYTokenizerTransformer(**params["pre_rvq_adapter_kwargs"])
         self.downsample = ResidualDownConv(**params["downsample_kwargs"])
@@ -1394,9 +1269,7 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
         if input_lengths is None:
             return None
 
-        return torch.tensor(
-            [_get_out_len(l) for l in input_lengths], device=self.device
-        )
+        return torch.tensor([_get_out_len(l) for l in input_lengths], device=self.device)
 
     def scale_window_size(self, boundaries, scaling_factor):
         scaling_range = []
@@ -1404,7 +1277,7 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
         for left_boundary, right_boundary in boundaries:
             scaling_left_boundary = left_boundary // scaling_factor
             scaling_right_boundary = right_boundary // scaling_factor
-            scaling_range.append(scaling_right_boundary-scaling_left_boundary)
+            scaling_range.append(scaling_right_boundary - scaling_left_boundary)
             scaling_boundaries.append(slice(scaling_left_boundary, scaling_right_boundary))
         return scaling_range, scaling_boundaries
 
@@ -1415,7 +1288,7 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
         features: Union[BatchFeature, ExtractorIterator],
         n_quantizers: Optional[int] = None,
         return_dict: Optional[bool] = True,
-    ) -> Union[XYTokenizerEncodeOutput, Tuple]:
+    ) -> Union[XYTokenizerEncodeOutput, tuple]:
         r"""
         Encodes the input audio waveform into discrete codes.
 
@@ -1446,9 +1319,7 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
             # 1. Iterate through chunks and store intermediate results
             for chunk_features in features:
                 # Always use return_dict=True for easier access to named outputs
-                chunk_output = self._encode(
-                    chunk_features, n_quantizers, return_dict=True
-                )
+                chunk_output = self._encode(chunk_features, n_quantizers, return_dict=True)
                 valid_code_lengths, valid_code_ranges = self.scale_window_size(
                     chunk_features["input_lengths"], self.encoder_downsample_rate
                 )
@@ -1457,9 +1328,7 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
                 chunk_length = chunk_output.codes_lengths.sum().item()
                 valid_chunk_length = sum(valid_code_lengths)
                 if chunk_output.commit_loss is not None and valid_chunk_length > 0:
-                    commit_loss = (
-                        chunk_output.commit_loss / chunk_length * valid_chunk_length
-                    )
+                    commit_loss = chunk_output.commit_loss / chunk_length * valid_chunk_length
                     commit_losses.append((commit_loss.cpu(), valid_chunk_length))
                     total_frames += valid_chunk_length
 
@@ -1468,13 +1337,9 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
                     valid_code_range = valid_code_ranges[i]
                     if valid_code_range.stop > 0:
                         encodings[seq_id]["zq"].append(
-                            chunk_output.quantized_representation[
-                                i : i + 1, :, valid_code_range
-                            ]
+                            chunk_output.quantized_representation[i : i + 1, :, valid_code_range]
                         )
-                        encodings[seq_id]["codes"].append(
-                            chunk_output.audio_codes[:, i : i + 1, valid_code_range]
-                        )
+                        encodings[seq_id]["codes"].append(chunk_output.audio_codes[:, i : i + 1, valid_code_range])
                         # Add the valid length of this chunk to the total for this sequence
                         encodings[seq_id]["length"] += valid_code_lengths[i]
 
@@ -1508,16 +1373,12 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
             # Stack the list of tensors into a single batch tensor
             quantized_representation = torch.cat(batch_zq, dim=0)
             audio_codes = torch.cat(batch_codes, dim=0)
-            codes_lengths = torch.tensor(
-                batch_lengths, dtype=torch.long, device=self.device
-            )
+            codes_lengths = torch.tensor(batch_lengths, dtype=torch.long, device=self.device)
 
             # 4. Calculate final commit loss
             if total_frames > 0:
                 # Weighted average of commit losses
-                commit_loss = (
-                    sum(loss * length for loss, length in commit_losses) / total_frames
-                )
+                commit_loss = sum(loss * length for loss, length in commit_losses) / total_frames
                 commit_loss = commit_loss.to(self.device)
             else:
                 commit_loss = torch.tensor(0.0, device=self.device)
@@ -1543,25 +1404,19 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
         features: BatchFeature,
         n_quantizers: Optional[int] = None,
         return_dict: Optional[bool] = True,
-    ) -> Union[XYTokenizerEncodeOutput, Tuple]:
+    ) -> Union[XYTokenizerEncodeOutput, tuple]:
         input_mel = features["input_features"].to(self.device, dtype=self.dtype)
         mel_attention_mask = features["attention_mask"].to(self.device)
         mel_output_length = mel_attention_mask.sum(dim=-1).long()
 
         # --- Encoder Path ---
-        semantic_encoder_output, semantic_encoder_output_length = self.semantic_encoder(
-            input_mel, mel_output_length
-        )
+        semantic_encoder_output, semantic_encoder_output_length = self.semantic_encoder(input_mel, mel_output_length)
         semantic_adapter_output, _ = self.semantic_encoder_adapter(
             semantic_encoder_output, semantic_encoder_output_length
         )
-        acoustic_encoder_output, acoustic_encoder_output_length = self.acoustic_encoder(
-            input_mel, mel_output_length
-        )
+        acoustic_encoder_output, acoustic_encoder_output_length = self.acoustic_encoder(input_mel, mel_output_length)
 
-        concated_channel = torch.cat(
-            [semantic_adapter_output, acoustic_encoder_output], dim=1
-        )
+        concated_channel = torch.cat([semantic_adapter_output, acoustic_encoder_output], dim=1)
 
         pre_rvq_adapter_output, pre_rvq_adapter_output_length = self.pre_rvq_adapter(
             concated_channel, acoustic_encoder_output_length
@@ -1591,7 +1446,7 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
         audio_codes: Union[torch.Tensor, XYTokenizerEncodeOutput],
         overlap_seconds: int = 10,
         return_dict: Optional[bool] = True,
-    ) -> Union[XYTokenizerDecodeOutput, Tuple]:
+    ) -> Union[XYTokenizerDecodeOutput, tuple]:
         r"""
         Decodes discrete codes back into an audio waveform.
 
@@ -1605,12 +1460,10 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
         Returns:
             [`XYTokenizerDecodeOutput`] or `tuple(torch.FloatTensor)`
         """
-        assert not isinstance(
-            audio_codes, tuple
-        ), "try to set param `return_dict=True` for `codec.encode()` function"
-        assert isinstance(
-            audio_codes, (torch.Tensor, XYTokenizerEncodeOutput)
-        ), "only accept `torch.Tensor` or `XYTokenizerEncodeOutput` for `codec.decode()` function"
+        assert not isinstance(audio_codes, tuple), "try to set param `return_dict=True` for `codec.encode()` function"
+        assert isinstance(audio_codes, (torch.Tensor, XYTokenizerEncodeOutput)), (
+            "only accept `torch.Tensor` or `XYTokenizerEncodeOutput` for `codec.decode()` function"
+        )
         if isinstance(audio_codes, XYTokenizerEncodeOutput):
             audio_codes = audio_codes.audio_codes
             if hasattr(audio_codes, "overlap_seconds"):
@@ -1620,14 +1473,10 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
         chunk_length = self.feature_extractor.chunk_length
         duration_seconds = chunk_length - overlap_seconds
         chunk_code_length = int(
-            chunk_length
-            * self.feature_extractor.sampling_rate
-            // self.config.encoder_downsample_rate
+            chunk_length * self.feature_extractor.sampling_rate // self.config.encoder_downsample_rate
         )  # Maximum code length per chunk
         duration_code_length = int(
-            duration_seconds
-            * self.feature_extractor.sampling_rate
-            // self.config.encoder_downsample_rate
+            duration_seconds * self.feature_extractor.sampling_rate // self.config.encoder_downsample_rate
         )  # Valid code length per chunk
         duration_wav_length = (
             duration_code_length * self.config.decoder_upsample_rate
@@ -1638,18 +1487,14 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
         codes_list = [audio_codes[:, i, :] for i in range(batch_size)]
         max_code_length = max(codes.shape[-1] for codes in codes_list)
         batch_size = len(codes_list)
-        codes_tensor = torch.zeros(
-            self.nq, batch_size, max_code_length, device=self.device, dtype=torch.long
-        )
+        codes_tensor = torch.zeros(self.nq, batch_size, max_code_length, device=self.device, dtype=torch.long)
         code_lengths = torch.zeros(batch_size, dtype=torch.long, device=self.device)
         for i, codes in enumerate(codes_list):
             codes_tensor[:, i, : codes.shape[-1]] = codes.to(self.device)
             code_lengths[i] = codes.shape[-1]  # (B,)
 
         # Calculate number of chunks needed
-        max_chunks = (
-            max_code_length + duration_code_length - 1
-        ) // duration_code_length
+        max_chunks = (max_code_length + duration_code_length - 1) // duration_code_length
         wav_list = []
 
         # Process the entire batch in chunks
@@ -1657,28 +1502,20 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
             start = chunk_idx * duration_code_length
             end = min(start + chunk_code_length, max_code_length)
             chunk_codes = codes_tensor[:, :, start:end]  # (nq, B, T')
-            chunk_code_lengths = torch.clamp(
-                code_lengths - start, 0, end - start
-            )  # (B,)
+            chunk_code_lengths = torch.clamp(code_lengths - start, 0, end - start)  # (B,)
 
             # Skip empty chunks
             if chunk_code_lengths.max() == 0:
                 continue
 
             # Decode
-            result = self._decode(
-                chunk_codes, chunk_code_lengths
-            )  # {"y": (B, 1, T'), "output_length": (B,)}
+            result = self._decode(chunk_codes, chunk_code_lengths)  # {"y": (B, 1, T'), "output_length": (B,)}
             chunk_wav = result["audio_values"]  # (B, 1, T')
             chunk_wav_lengths = result["output_length"]  # (B,)
 
             # Extract valid portion
-            valid_wav_lengths = torch.clamp(
-                chunk_wav_lengths, 0, duration_wav_length
-            )  # (B,)
-            valid_chunk_wav = torch.zeros(
-                batch_size, 1, duration_wav_length, device=self.device
-            )
+            valid_wav_lengths = torch.clamp(chunk_wav_lengths, 0, duration_wav_length)  # (B,)
+            valid_chunk_wav = torch.zeros(batch_size, 1, duration_wav_length, device=self.device)
             for b in range(batch_size):
                 if valid_wav_lengths[b] > 0:
                     valid_chunk_wav[b, :, : valid_wav_lengths[b]] = chunk_wav[
@@ -1691,13 +1528,10 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
         if wav_list:
             wav_tensor = torch.cat(wav_list, dim=-1)  # (B, 1, T_total)
             syn_wav_list = [
-                wav_tensor[i, :, : code_lengths[i] * self.config.decoder_upsample_rate]
-                for i in range(batch_size)
+                wav_tensor[i, :, : code_lengths[i] * self.config.decoder_upsample_rate] for i in range(batch_size)
             ]  # B * (1, T,)
         else:
-            syn_wav_list = [
-                torch.zeros(1, 0, device=self.device) for _ in range(batch_size)
-            ]  # B * (1, 0,)
+            syn_wav_list = [torch.zeros(1, 0, device=self.device) for _ in range(batch_size)]  # B * (1, 0,)
 
         if not return_dict:
             return (syn_wav_list,)
@@ -1709,7 +1543,7 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
         audio_codes: torch.Tensor,
         codes_lengths: Optional[torch.Tensor] = None,
         return_dict: Optional[bool] = True,
-    ) -> Union[XYTokenizerDecodeOutput, Tuple]:
+    ) -> Union[XYTokenizerDecodeOutput, tuple]:
         r"""
         Decodes discrete codes back into an audio waveform.
 
@@ -1723,37 +1557,27 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
         Returns:
             [`XYTokenizerDecodeOutput`] or `tuple(torch.FloatTensor)`
         """
-        return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
-        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         if codes_lengths is None:
-            codes_lengths = torch.full(
-                (audio_codes.shape[1],), audio_codes.shape[2], device=self.device
-            )
+            codes_lengths = torch.full((audio_codes.shape[1],), audio_codes.shape[2], device=self.device)
 
         # --- Decoder Path ---
         zq = self.quantizer.decode_codes(audio_codes)
 
-        post_rvq_adapter_output, post_rvq_adapter_output_length = self.post_rvq_adapter(
-            zq, codes_lengths
-        )
+        post_rvq_adapter_output, post_rvq_adapter_output_length = self.post_rvq_adapter(zq, codes_lengths)
         upsample_output, upsample_output_length = self.upsample(
             post_rvq_adapter_output, post_rvq_adapter_output_length
         )
         acoustic_decoder_output, acoustic_decoder_output_length = self.acoustic_decoder(
             upsample_output, upsample_output_length
         )
-        y, vocos_output_length = self.enhanced_vocos(
-            acoustic_decoder_output, acoustic_decoder_output_length
-        )
+        y, vocos_output_length = self.enhanced_vocos(acoustic_decoder_output, acoustic_decoder_output_length)
 
         if not return_dict:
             return (y, vocos_output_length)
 
-        return XYTokenizerDecodeOutput(
-            audio_values=y, output_length=vocos_output_length
-        )
+        return XYTokenizerDecodeOutput(audio_values=y, output_length=vocos_output_length)
 
     @add_start_docstrings_to_model_forward(XY_TOKENIZER_INPUTS_DOCSTRING)
     def forward(
@@ -1762,7 +1586,7 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         n_quantizers: Optional[int] = None,
         return_dict: Optional[bool] = True,
-    ) -> Union[XYTokenizerModelOutput, Tuple]:
+    ) -> Union[XYTokenizerModelOutput, tuple]:
         r"""
         The forward method that handles the full encoding and decoding process.
 
@@ -1821,9 +1645,7 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
         Returns:
             [`XYTokenizerModelOutput`] or `tuple(torch.FloatTensor)`
         """
-        return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
-        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         encoder_outputs = self.encode(
             input_values=input_values,

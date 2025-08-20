@@ -17,14 +17,16 @@
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 
+
 logger = logging.get_logger(__name__)
 
 
 class XYTokenizerConfig(PretrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`XYTokenizerModel`]. It is used to instantiate a
-    XY-Tokenizer model according to the specified arguments, defining the model architecture.
-
+    XY-Tokenizer model according to the specified arguments, defining the model architecture. Instantiating a
+    configuration with the defaults will yield a similar configuration to that of the XY-Tokenizer
+    [fnlp/XY_Tokenizer_TTSD_V0_hf](https://huggingface.co/fnlp/XY_Tokenizer_TTSD_V0_hf) architecture.
     Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
     documentation from [`PretrainedConfig`] for more information.
 
@@ -69,6 +71,7 @@ class XYTokenizerConfig(PretrainedConfig):
             The standard deviation for weight initialization.
         use_cache (`bool`, *optional*, defaults to `True`): <fill_docstring>
     """
+
     model_type = "xy_tokenizer"
 
     def __init__(
@@ -115,10 +118,10 @@ class XYTokenizerConfig(PretrainedConfig):
         self.max_position_embeddings = max_position_embeddings
         self.initializer_range = initializer_range
         self.use_cache = use_cache
-        
+
         # Store complex nested parameters dynamically for backward compatibility
         self.params = kwargs
-        
+
         super().__init__(**kwargs)
 
 

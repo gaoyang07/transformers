@@ -22,10 +22,6 @@
 from dataclasses import dataclass
 from typing import Optional, Union
 
-import torch
-import torch.nn as nn
-from liger_kernel.transformers.model.loss_utils import LigerForCausalLMLoss
-
 from ...cache_utils import Cache
 from ...generation import GenerationConfig, GenerationMixin, LogitsProcessorList, StoppingCriteriaList
 from ...generation.logits_process import (
@@ -40,8 +36,13 @@ from ...loss.loss_utils import ForCausalLMLoss
 from ...modeling_outputs import BaseModelOutputWithPast
 from ...modeling_utils import PreTrainedModel
 from ...models.qwen3.modeling_qwen3 import Qwen3Model
-from ...utils import ModelOutput, auto_docstring
+from ...utils import ModelOutput, auto_docstring, is_torch_available
 from .configuration_moss_ttsd import MossTTSDConfig
+
+
+if is_torch_available():
+    import torch
+    import torch.nn as nn
 
 
 @dataclass
@@ -494,19 +495,10 @@ class MossTTSDForCausalLM(MossTTSDPretrainedModel, MossTTSDGenerationMixin):
 
         for i in range(self.config.channels):
             vocab_size = self.config.vocab_size if i == 0 else self.config.speech_vocab_size
-            if skip_logits and LigerForCausalLMLoss is not None:
-                loss_all[i] = LigerForCausalLMLoss(
-                    hidden_states=hidden_states,
-                    lm_head_weight=self.lm_heads[i].weight,
-                    labels=labels[..., i],
-                    hidden_size=self.config.hidden_size,
-                    **kwargs,
-                )
-            else:
-                logits = self.lm_heads[i](hidden_states)
-                loss_all[i] = ForCausalLMLoss(logits, labels[..., i], vocab_size)
-                if not skip_logits:
-                    logits_list.append(logits)
+            logits = self.lm_heads[i](hidden_states)
+            loss_all[i] = ForCausalLMLoss(logits, labels[..., i], vocab_size)
+            if not skip_logits:
+                logits_list.append(logits)
 
         logits_all = tuple(logits_list) if logits_list else None
 
