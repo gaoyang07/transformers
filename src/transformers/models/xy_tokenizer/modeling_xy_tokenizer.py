@@ -1402,7 +1402,7 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
         scaling_range = []
         scaling_boundaries = []
         for left_boundary, right_boundary in boundaries:
-            scaling_left_boundary = left_boundary// scaling_factor
+            scaling_left_boundary = left_boundary // scaling_factor
             scaling_right_boundary = right_boundary // scaling_factor
             scaling_range.append(scaling_right_boundary-scaling_left_boundary)
             scaling_boundaries.append(slice(scaling_left_boundary, scaling_right_boundary))
@@ -1570,7 +1570,6 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
             pre_rvq_adapter_output, pre_rvq_adapter_output_length
         )
 
-        torch.save(downsample_output, "outputs/hidden1.pt")
         n_quantizers = n_quantizers or self.quantizer.num_quantizers
         zq, codes, vq_loss, _, quantizer_output_length = self.quantizer(
             downsample_output, downsample_output_length, n_quantizers=n_quantizers
