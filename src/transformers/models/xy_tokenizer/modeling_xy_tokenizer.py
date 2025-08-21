@@ -20,7 +20,6 @@ from dataclasses import asdict, dataclass
 from typing import Optional, Union
 
 import numpy as np
-from einops import rearrange
 
 from ...activations import ACT2FN
 from ...feature_extraction_utils import BatchFeature
@@ -952,7 +951,7 @@ class VectorQuantize(nn.Module):
 
     def forward(self, z):
         z_e = self.in_project(z.float())
-        encodings = rearrange(z_e, "b d t -> (b t) d")
+        encodings = z_e.permute(0, 2, 1).reshape(-1, z_e.size(1))  # b d t -> (b t) d
         if self.kmeans_init and not self.inited.item():
             self.init_codebook(encodings)
         dist = (
@@ -960,7 +959,7 @@ class VectorQuantize(nn.Module):
             - 2 * encodings @ self.codebook.float().t()
             + self.codebook.float().pow(2).sum(1, keepdim=True).t()
         )
-        indices = rearrange((-dist).max(1)[1], "(b t) -> b t", b=z.size(0))
+        indices = (-dist).max(1)[1].reshape(z.size(0), -1)  # (b t) -> b t
         z_q = self.decode_code(indices)
         commit_loss = F.mse_loss(z_e, z_q.detach(), reduction="none").mean([1, 2]) * self.commitment
         if self.training and torch.is_grad_enabled():
