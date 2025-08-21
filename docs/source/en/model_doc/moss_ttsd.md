@@ -157,3 +157,24 @@ for i, data in enumerate(audios):
         print(f"Saving audio_{i}_{j}.wav...", flush=True)
         torchaudio.save(f"outputs/audio_{i}_{j}.wav", fragment.cpu(), 24000)
 ```
+
+## MossTTSDConfig
+
+[[autodoc]] MossTTSDConfig
+
+## MossTTSDModel
+
+[[autodoc]] MossTTSDModel
+    - forward
+
+## MossTTSDForCausalLM
+
+[[autodoc]] MossTTSDForCausalLM
+    - forward
+
+## MossTTSDProcessor
+
+[[autodoc]] MossTTSDProcessor
+    - __call__
+    - from_pretrained
+    - save_pretrained
