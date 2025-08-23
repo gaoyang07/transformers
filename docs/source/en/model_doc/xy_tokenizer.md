@@ -9,12 +9,12 @@ This model provides efficient tokenization for multi-modal inputs and can be use
 ## Usage
 
 ```python
-from transformers import XYTokenizerConfig, XYTokenizerModel, XYTokenizerFeatureExtractor
+from transformers import XYTokenizerConfig, XYTokenizer, XYTokenizerFeatureExtractor
 import torch
 
 # Initialize the model
 config = XYTokenizerConfig()
-model = XYTokenizerModel(config)
+model = XYTokenizer(config)
 feature_extractor = XYTokenizerFeatureExtractor()
 
 # Process multi-modal input
@@ -26,9 +26,9 @@ outputs = model(input_data)
 
 [[autodoc]] XYTokenizerConfig
 
-## XYTokenizerModel
+## XYTokenizer
 
-[[autodoc]] XYTokenizerModel
+[[autodoc]] XYTokenizer
     - forward
 
 ## XYTokenizerFeatureExtractor

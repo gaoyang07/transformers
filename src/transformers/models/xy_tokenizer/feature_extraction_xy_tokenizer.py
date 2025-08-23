@@ -17,10 +17,11 @@ Feature extractor class for XY-Tokenizer
 """
 
 import math
-import numpy as np
 from collections import deque
 from functools import partial
 from typing import Optional, Union
+
+import numpy as np
 
 from ...audio_utils import mel_filter_bank
 from ...feature_extraction_utils import BatchFeature
@@ -34,7 +35,7 @@ logger = logging.get_logger(__name__)
 def pad_sequence(sequence, padding_size, padding_value=0.0):
     """Pad a sequence with zeros."""
     if padding_size > 0:
-        return np.pad(sequence, (0, padding_size), mode='constant', constant_values=padding_value)
+        return np.pad(sequence, (0, padding_size), mode="constant", constant_values=padding_value)
     return sequence
 
 
@@ -42,11 +43,11 @@ def unfold_sequence(sequence, kernel_size, stride):
     """Unfold a sequence into overlapping windows."""
     if len(sequence) < kernel_size:
         return np.array([sequence])
-    
+
     windows = []
     for i in range(0, len(sequence) - kernel_size + 1, stride):
-        windows.append(sequence[i:i + kernel_size])
-    
+        windows.append(sequence[i : i + kernel_size])
+
     return np.array(windows)
 
 
@@ -159,11 +160,11 @@ class ExtractorIterator:
 
     def chunk_and_pad_view(self, tensor, seq_no):
         # Convert tensor to numpy array if needed
-        if hasattr(tensor, 'numpy'):
+        if hasattr(tensor, "numpy"):
             x = tensor.numpy()
         else:
             x = np.array(tensor)
-        
+
         x = x[0:1, :].reshape(1, 1, -1)
 
         stride = self.duration_size
@@ -174,7 +175,7 @@ class ExtractorIterator:
         target_len = (num_chunks - 1) * stride + kernel
         padding_size = max(0, target_len - L)
         x_padded = pad_sequence(x[0, 0, :], padding_size, 0.0)
-        
+
         # Create overlapping windows
         output_tensor = unfold_sequence(x_padded, kernel, stride)
         output_tensor = output_tensor.reshape(-1, 1, kernel)

@@ -16,7 +16,7 @@
 
 import unittest
 
-from transformers import XYTokenizerConfig, XYTokenizerModel
+from transformers import XYTokenizer, XYTokenizerConfig
 from transformers.testing_utils import is_torch_available, require_torch, slow, torch_device
 
 from ...test_configuration_common import ConfigTester
@@ -31,7 +31,7 @@ if is_torch_available():
 XY_TOKENIZER_PRETRAINED_MODEL_ARCHIVE_LIST = []
 
 
-class XYTokenizerModelTester:
+class XYTokenizerTester:
     def __init__(
         self,
         parent,
@@ -122,7 +122,7 @@ class XYTokenizerModelTester:
     def create_and_check_model(
         self, config, input_ids, token_type_ids, input_mask, sequence_labels, token_labels, choice_labels
     ):
-        model = XYTokenizerModel(config=config)
+        model = XYTokenizer(config=config)
         model.to(torch_device)
         model.eval()
         result = model(input_ids, attention_mask=input_mask, token_type_ids=token_type_ids)
@@ -148,12 +148,12 @@ class XYTokenizerModelTester:
 
 
 @require_torch
-class XYTokenizerModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
-    all_model_classes = (XYTokenizerModel,) if is_torch_available() else ()
+class XYTokenizerTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
+    all_model_classes = (XYTokenizer,) if is_torch_available() else ()
     all_generative_model_classes = () if is_torch_available() else ()
     pipeline_model_mapping = (
         {
-            "feature-extraction": XYTokenizerModel,
+            "feature-extraction": XYTokenizer,
         }
         if is_torch_available()
         else {}
@@ -166,7 +166,7 @@ class XYTokenizerModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestC
     test_resize_embeddings = False
 
     def setUp(self):
-        self.model_tester = XYTokenizerModelTester(self)
+        self.model_tester = XYTokenizerTester(self)
         self.config_tester = ConfigTester(self, config_class=XYTokenizerConfig, hidden_size=37)
 
     def test_config(self):
@@ -179,15 +179,15 @@ class XYTokenizerModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestC
     @slow
     def test_model_from_pretrained(self):
         for model_name in XY_TOKENIZER_PRETRAINED_MODEL_ARCHIVE_LIST[:1]:
-            model = XYTokenizerModel.from_pretrained(model_name)
+            model = XYTokenizer.from_pretrained(model_name)
             self.assertIsNotNone(model)
 
 
 @require_torch
-class XYTokenizerModelIntegrationTest(unittest.TestCase):
+class XYTokenizerIntegrationTest(unittest.TestCase):
     @slow
     def test_inference_no_head_absolute_embedding(self):
-        model = XYTokenizerModel.from_pretrained("test-model")
+        model = XYTokenizer.from_pretrained("test-model")
         input_ids = torch.tensor([[1, 1804, 338, 686], [1, 1804, 338, 686]]).to(torch_device)
         attention_mask = torch.tensor([[1, 1, 1, 1], [1, 1, 1, 0]]).to(torch_device)
         with torch.no_grad():

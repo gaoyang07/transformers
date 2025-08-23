@@ -872,7 +872,7 @@ MODEL_NAMES_MAPPING = OrderedDict[str, str](
         ("xlsr_wav2vec2", "XLSR-Wav2Vec2"),
         ("xlstm", "xLSTM"),
         ("xmod", "X-MOD"),
-        ("xy_tokenizer", "XY-Tokenizer"),
+        ("xy_tokenizer", "XYTokenizer"),
         ("yolos", "YOLOS"),
         ("yoso", "YOSO"),
         ("zamba", "Zamba"),

@@ -25,7 +25,7 @@ from ...activations import ACT2FN
 from ...feature_extraction_utils import BatchFeature
 from ...modeling_attn_mask_utils import _prepare_4d_attention_mask
 from ...modeling_outputs import ModelOutput
-from ...modeling_utils import PreTrainedModel
+from ...modeling_utils import PreTrainedModel, PreTrainedAudioTokenizerBase
 from ...utils import add_start_docstrings, add_start_docstrings_to_model_forward, is_torch_available, logging
 from .configuration_xy_tokenizer import XYTokenizerConfig
 from .feature_extraction_xy_tokenizer import ExtractorIterator, XYTokenizerFeatureExtractor
@@ -49,7 +49,7 @@ _CONFIG_FOR_DOC = "XYTokenizerConfig"
 @dataclass
 class XYTokenizerEncodeOutput(ModelOutput):
     """
-    Output type of [`XYTokenizerModel.encode`].
+    Output type of [`XYTokenizer.encode`].
 
     Args:
         quantized_representation (`torch.FloatTensor` of shape `(batch_size, hidden_dim, sequence_length)`):
@@ -74,7 +74,7 @@ class XYTokenizerEncodeOutput(ModelOutput):
 @dataclass
 class XYTokenizerDecodeOutput(ModelOutput):
     """
-    Output type of [`XYTokenizerModel.decode`].
+    Output type of [`XYTokenizer.decode`].
 
     Args:
         audio_values (`torch.FloatTensor` of shape `(batch_size, 1, sequence_length)`):
@@ -88,9 +88,9 @@ class XYTokenizerDecodeOutput(ModelOutput):
 
 
 @dataclass
-class XYTokenizerModelOutput(ModelOutput):
+class XYTokenizerOutput(ModelOutput):
     """
-    Output type of [`XYTokenizerModel`]'s forward pass.
+    Output type of [`XYTokenizer`]'s forward pass.
 
     Args:
         audio_values (`torch.FloatTensor` of shape `(batch_size, 1, sequence_length)`):
@@ -1194,7 +1194,7 @@ XY_TOKENIZER_INPUTS_DOCSTRING = r"""
     "The bare XY-Tokenizer Model outputting raw hidden-states without any specific head on top.",
     XY_TOKENIZER_START_DOCSTRING,
 )
-class XYTokenizerPreTrainedModel(PreTrainedModel):
+class XYTokenizerPreTrainedModel(PreTrainedAudioTokenizerBase):
     """
     An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
     models.
@@ -1230,7 +1230,7 @@ class XYTokenizerPreTrainedModel(PreTrainedModel):
     "The XY-Tokenizer Model for encoding and decoding audio.",
     XY_TOKENIZER_START_DOCSTRING,
 )
-class XYTokenizerModel(XYTokenizerPreTrainedModel):
+class XYTokenizer(XYTokenizerPreTrainedModel):
     def __init__(self, config: XYTokenizerConfig):
         super().__init__(config)
         # Reconstruct the nested parameter dictionaries from the flat config
@@ -1253,6 +1253,8 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
         # Store some config values for easier access
         self.encoder_downsample_rate = config.encoder_downsample_rate
         self.nq = params["quantizer_kwargs"]["num_quantizers"]
+        self.input_sample_rate = config.input_sample_rate
+        self.output_sample_rate = config.output_sample_rate
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -1585,7 +1587,7 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         n_quantizers: Optional[int] = None,
         return_dict: Optional[bool] = True,
-    ) -> Union[XYTokenizerModelOutput, tuple]:
+    ) -> Union[XYTokenizerOutput, tuple]:
         r"""
         The forward method that handles the full encoding and decoding process.
 
@@ -1642,7 +1644,7 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
         ```
 
         Returns:
-            [`XYTokenizerModelOutput`] or `tuple(torch.FloatTensor)`
+            [`XYTokenizerOutput`] or `tuple(torch.FloatTensor)`
         """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -1665,7 +1667,7 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
                 encoder_outputs.commit_loss,
             )
 
-        return XYTokenizerModelOutput(
+        return XYTokenizerOutput(
             audio_values=decoder_outputs.audio_values,
             output_length=decoder_outputs.output_length,
             quantized_representation=encoder_outputs.quantized_representation,
@@ -1675,7 +1677,4 @@ class XYTokenizerModel(XYTokenizerPreTrainedModel):
         )
 
 
-__all__ = [
-    "XYTokenizerModel",
-    "XYTokenizerPreTrainedModel",
-]
+__all__ = ["XYTokenizer"]

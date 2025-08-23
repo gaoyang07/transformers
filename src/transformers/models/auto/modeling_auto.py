@@ -410,7 +410,7 @@ MODEL_MAPPING_NAMES = OrderedDict(
         ("xlnet", "XLNetModel"),
         ("xlstm", "xLSTMModel"),
         ("xmod", "XmodModel"),
-        ("xy_tokenizer", "XYTokenizerModel"),
+        ("xy_tokenizer", "XYTokenizer"),
         ("yolos", "YolosModel"),
         ("yoso", "YosoModel"),
         ("zamba", "ZambaModel"),
@@ -1747,6 +1747,7 @@ MODEL_FOR_IMAGE_TO_IMAGE_MAPPING_NAMES = OrderedDict(
 MODEL_FOR_AUDIO_TOKENIZATION_NAMES = OrderedDict(
     [
         ("dac", "DacModel"),
+        ("xy_tokenizer", "XYTokenizer"),
     ]
 )
 

@@ -23,7 +23,7 @@ logger = logging.get_logger(__name__)
 
 class XYTokenizerConfig(PretrainedConfig):
     r"""
-    This is the configuration class to store the configuration of a [`XYTokenizerModel`]. It is used to instantiate a
+    This is the configuration class to store the configuration of a [`XYTokenizer`]. It is used to instantiate a
     XY-Tokenizer model according to the specified arguments, defining the model architecture. Instantiating a
     configuration with the defaults will yield a similar configuration to that of the XY-Tokenizer
     [fnlp/XY_Tokenizer_TTSD_V0_hf](https://huggingface.co/fnlp/XY_Tokenizer_TTSD_V0_hf) architecture.
