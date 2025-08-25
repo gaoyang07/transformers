@@ -893,5 +893,24 @@ class MossTTSDProcessor(ProcessorMixin):
             sampling_rate=self.output_sample_rate,
         )
 
+    def save_audio(self, audios, output_dir="output", prefix="audio"):
+        """
+        Save multiple audio fragments to files.
+        
+        Args:
+            audios: List of audio data fragments from batch_decode
+            output_dir (str): Directory to save audio files
+            prefix (str): Prefix for audio filenames
+        """
+        if not is_torchaudio_available():
+            raise ImportError("Please install `torchaudio` to save audio files.")
+        
+        os.makedirs(output_dir, exist_ok=True)
+
+        for i, data in enumerate(audios):
+            for j, fragment in enumerate(data):
+                filename = f"{output_dir}/{prefix}_{i}_{j}.wav"
+                torchaudio.save(filename, fragment.cpu(), self.output_sample_rate)
+
 
 __all__ = ["MossTTSDProcessor"]
