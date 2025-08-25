@@ -1,10 +1,20 @@
 # coding=utf-8
-# Copyright 2025 OpenMOSS and HuggingFace Inc.
+# Copyright 2025 OpenMOSS and the HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
-# http://www.apache.org/licenses/LICENSE-2.0
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-"""MOSS-TTSD processing utilities."""
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""
+Processor class for MOSS-TTSD.
+"""
 
 from __future__ import annotations
 
@@ -12,15 +22,15 @@ import math
 import os
 import re
 from dataclasses import asdict, dataclass
-from typing import Any, Callable, Optional, Union, List
+from typing import Any, Callable, Optional, Union
 
 import numpy as np
-from transformers.models.xy_tokenizer.modeling_xy_tokenizer import XYTokenizer
-from transformers import AutoFeatureExtractor, AutoModel, AutoTokenizer
 
-from transformers.processing_utils import ProcessorMixin, ProcessingKwargs, Unpack
-from transformers.tokenization_utils_base import BatchEncoding
-from transformers.utils import is_torch_available, is_torchaudio_available
+from ...processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
+from ...tokenization_utils_base import BatchEncoding
+from ...utils import is_torch_available, is_torchaudio_available
+from .. import AutoFeatureExtractor, AutoTokenizer
+from ..xy_tokenizer.modeling_xy_tokenizer import XYTokenizer
 
 
 if is_torch_available():
@@ -30,14 +40,13 @@ if is_torchaudio_available():
     import torchaudio
 
 
-
-
 class MossTTSDProcessorKwargs(ProcessingKwargs, total=False):
     """
     Arguments for configuring MOSS-TTSD processing operations.
-    
+
     Inherits from ProcessingKwargs and provides structured configuration for text and audio processing.
     """
+
     _defaults = {
         "text_kwargs": {
             "pad_token_id": 0,  # Fallback pad token ID, actual value comes from tokenizer.pad_token_id
@@ -60,19 +69,21 @@ class MossTTSDProcessorKwargs(ProcessingKwargs, total=False):
     }
 
 
-
-
 @dataclass
 class MossTTSDChatSample:
     """
     Intermediate representation of a single sample with T×C grid layout and metadata.
-    
+
     Args:
-        input_ids_2d: Shape (T, C) tensor where column 0 contains text tokens and columns 1..C-1 contain
+        input_ids_2d (`torch.LongTensor`):
+            Shape (T, C) tensor where column 0 contains text tokens and columns 1..C-1 contain
             quantized audio codebooks (or padding token 1024 for empty slots).
-        label_ids_2d: Optional label tensor for training, same shape as input_ids_2d.
-        meta: Dictionary containing metadata for debugging and tracking purposes.
+        label_ids_2d (`torch.LongTensor`, *optional*):
+            Optional label tensor for training, same shape as input_ids_2d.
+        meta (`dict`):
+            Dictionary containing metadata for debugging and tracking purposes.
     """
+
     input_ids_2d: "torch.LongTensor"
     label_ids_2d: Optional["torch.LongTensor"]
     meta: dict
@@ -81,67 +92,84 @@ class MossTTSDChatSample:
 @dataclass
 class MossTTSDBatchInput:
     """
-    Batched input tensors for MOSS-TTSD model, following HiggsAudioBatchInput style with explicit field names.
-    
+    Batched input tensors for MOSS-TTSD model.
+
     Args:
-        input_ids: Shape (B, T, C) tensor containing batched input token IDs.
-        attention_mask: Shape (B, T) tensor containing attention mask for valid tokens.
-        labels: Optional shape (B, T, C) tensor containing label token IDs for training.
+        input_ids (`torch.LongTensor`):
+            Shape (B, T, C) tensor containing batched input token IDs.
+        attention_mask (`torch.LongTensor`):
+            Shape (B, T) tensor containing attention mask for valid tokens.
+        labels (`torch.LongTensor`, *optional*):
+            Optional shape (B, T, C) tensor containing label token IDs for training.
     """
-    input_ids: "torch.LongTensor"         # (B, T, C)
-    attention_mask: "torch.LongTensor"    # (B, T)
-    labels: Optional["torch.LongTensor"]  # (B, T, C) or None
+
+    input_ids: "torch.LongTensor"
+    attention_mask: "torch.LongTensor"
+    labels: Optional["torch.LongTensor"]
 
 
 @dataclass
 class MossTTSDResponse:
     """
     Unified response container for MOSS-TTSD inference outputs.
-    
+
     Args:
-        audio: Optional numpy array containing generated audio waveform.
-        generated_text: String containing generated text output.
-        sampling_rate: Optional integer specifying the sampling rate of the generated audio.
+        audio (`np.ndarray`, *optional*):
+            Optional numpy array containing generated audio waveform.
+        generated_text (`str`, *optional*, defaults to `""`):
+            String containing generated text output.
+        sampling_rate (`int`, *optional*):
+            Optional integer specifying the sampling rate of the generated audio.
     """
+
     audio: Optional[np.ndarray] = None
     generated_text: str = ""
     sampling_rate: Optional[int] = None
 
 
-
-
 class MossTTSDSampleProcessor:
     """
     Sample-level processor for MOSS-TTSD that handles individual sample processing without batch padding.
-    
-    This class refactors the per-sample processing logic that was previously scattered in Processor.__call__:
+
+    This class handles per-sample processing logic:
     - Parses JSONL items (text/prompt_text/prompt_audio)
     - Optional text normalization
-    - Audio loading/resampling/merging, feature extraction and encoding (audio_tokenizer.encode/decode)
-    - Generates T×C grid and performs multi-channel shifting (preserving legacy implementation semantics)
-    
+    - Audio loading/resampling/merging, feature extraction and encoding
+    - Generates T×C grid and performs multi-channel shifting
+
     Args:
-        tokenizer: The text tokenizer for encoding text tokens.
-        feature_extractor: Optional feature extractor for audio preprocessing.
-        audio_tokenizer: Optional audio tokenizer for audio encoding/decoding.
-        chat_template: Optional chat template string for conversation formatting.
-        speech_token_range: List of [start, end] token IDs for speech token mapping.
-        audio_bos_token: Beginning of speech token string.
-        audio_eos_token: End of speech token string.
-        audio_pad_token_id: Padding token ID for audio channels.
-        max_channels: Maximum number of quantization channels.
-        input_sample_rate: Target sample rate for input audio.
-        encoder_downsample_rate: Downsampling rate of the audio encoder.
+        tokenizer (`AutoTokenizer`):
+            The text tokenizer for encoding text tokens.
+        feature_extractor (`AutoFeatureExtractor`, *optional*):
+            Optional feature extractor for audio preprocessing.
+        audio_tokenizer (`AutoModel`, *optional*):
+            Optional audio tokenizer for audio encoding/decoding.
+        chat_template (`str`, *optional*):
+            Optional chat template string for conversation formatting.
+        speech_token_range (`List[int]`):
+            List of [start, end] token IDs for speech token mapping.
+        audio_bos_token (`str`):
+            Beginning of speech token string.
+        audio_eos_token (`str`):
+            End of speech token string.
+        audio_pad_token_id (`int`):
+            Padding token ID for audio channels.
+        max_channels (`int`):
+            Maximum number of quantization channels.
+        input_sample_rate (`int`):
+            Target sample rate for input audio.
+        encoder_downsample_rate (`int`):
+            Downsampling rate of the audio encoder.
     """
 
     def __init__(
         self,
-        tokenizer: AutoTokenizer,
-        feature_extractor: Optional[AutoFeatureExtractor],
-        audio_tokenizer: Optional[AutoModel],
+        tokenizer,
+        feature_extractor: Optional = None,
+        audio_tokenizer: Optional = None,
         *,
         chat_template: Optional[str],
-        speech_token_range: List[int],
+        speech_token_range: list[int],
         audio_bos_token: str,
         audio_eos_token: str,
         audio_pad_token_id: int,
@@ -172,16 +200,21 @@ class MossTTSDSampleProcessor:
     ) -> MossTTSDChatSample:
         """
         Prepare a single sample from JSONL item into MossTTSDChatSample format.
-        
+
         Args:
-            item: Dictionary containing the input data (text, prompt_audio, etc.).
-            apply_chat_template: Function to apply chat template formatting.
-            use_normalize: Whether to apply text normalization.
-            silence_duration: Duration of silence to append to audio for encoder segmentation.
-            **kwargs: Additional keyword arguments passed to chat template.
-            
+            item (`dict`):
+                Dictionary containing the input data (text, prompt_audio, etc.).
+            apply_chat_template (`callable`):
+                Function to apply chat template formatting.
+            use_normalize (`bool`, *optional*, defaults to `False`):
+                Whether to apply text normalization.
+            silence_duration (`float`, *optional*, defaults to `0.0`):
+                Duration of silence to append to audio for encoder segmentation.
+            **kwargs:
+                Additional keyword arguments passed to chat template.
+
         Returns:
-            MossTTSDChatSample: Processed sample with 2D input tensor and metadata.
+            `MossTTSDChatSample`: Processed sample with 2D input tensor and metadata.
         """
         processed = self._process_jsonl_item(item)
         system_prompt = item.get("system_prompt")
@@ -218,21 +251,24 @@ class MossTTSDSampleProcessor:
 
     def collate(
         self,
-        samples: List[MossTTSDChatSample],
+        samples: list[MossTTSDChatSample],
         *,
         pad_token_id: int,
         audio_pad_token_id: int,
     ) -> MossTTSDBatchInput:
         """
         Collate multiple samples into a batch with proper padding.
-        
+
         Args:
-            samples: List of MossTTSDChatSample objects to collate.
-            pad_token_id: Padding token ID for text tokens.
-            audio_pad_token_id: Padding token ID for audio tokens.
-            
+            samples (`List[MossTTSDChatSample]`):
+                List of MossTTSDChatSample objects to collate.
+            pad_token_id (`int`):
+                Padding token ID for text tokens.
+            audio_pad_token_id (`int`):
+                Padding token ID for audio tokens.
+
         Returns:
-            MossTTSDBatchInput: Batched input with padded tensors.
+            `MossTTSDBatchInput`: Batched input with padded tensors.
         """
         assert is_torch_available(), "PyTorch is required for collation."
         ids_list = [s.input_ids_2d for s in samples]
@@ -271,14 +307,14 @@ class MossTTSDSampleProcessor:
     def _process_jsonl_item(item: dict[str, Any]) -> dict[str, Any]:
         """
         Process a JSONL item to extract text and audio data.
-        
+
         Supports both single-speaker and multi-speaker formats:
         - Single: {"prompt_audio": path, "prompt_text": text}
         - Multi: {"prompt_audio_speaker1": path1, "prompt_text_speaker1": text1, ...}
-        
+
         Args:
             item: Dictionary containing the JSONL item data.
-            
+
         Returns:
             Dictionary with extracted "text", "prompt_text", and "prompt_audio" fields.
         """
@@ -315,13 +351,13 @@ class MossTTSDSampleProcessor:
     def _normalize_text(text: str) -> str:
         """
         Normalize text by applying various transformations for TTS processing.
-        
+
         Performs speaker tag conversion, punctuation normalization, laughter conversion,
         and other text cleaning operations suitable for speech synthesis.
-        
+
         Args:
             text: Input text string to normalize.
-            
+
         Returns:
             Normalized text string.
         """
@@ -353,13 +389,13 @@ class MossTTSDSampleProcessor:
     def _load_single_audio(audio_input: Union[str, tuple["torch.Tensor", int]]):
         """
         Load audio from file path or tensor tuple.
-        
+
         Args:
             audio_input: Either a file path string or a tuple of (tensor, sample_rate).
-            
+
         Returns:
             Tuple of (audio_tensor, sample_rate).
-            
+
         Raises:
             ValueError: If audio input format is unsupported.
         """
@@ -379,12 +415,12 @@ class MossTTSDSampleProcessor:
     def _resample(audio: "torch.Tensor", sr: int, target_sr: int) -> tuple["torch.Tensor", int]:
         """
         Resample audio to target sample rate and convert to mono if needed.
-        
+
         Args:
             audio: Input audio tensor with shape (channels, time).
             sr: Current sample rate.
             target_sr: Target sample rate.
-            
+
         Returns:
             Tuple of (resampled_audio, target_sr) where audio is mono with shape (1, time).
         """
@@ -402,11 +438,11 @@ class MossTTSDSampleProcessor:
     ) -> tuple["torch.Tensor", int]:
         """
         Load and resample audio data to target sample rate.
-        
+
         Args:
             audio_input: Audio file path or tensor tuple.
             target_sample_rate: Target sample rate for resampling.
-            
+
         Returns:
             Tuple of (audio_tensor, target_sample_rate).
         """
@@ -422,12 +458,12 @@ class MossTTSDSampleProcessor:
     ) -> "torch.Tensor":
         """
         Merge two speaker audio inputs by concatenation.
-        
+
         Args:
             wav1: Audio input for speaker 1.
             wav2: Audio input for speaker 2.
             target_sample_rate: Target sample rate for both audio inputs.
-            
+
         Returns:
             Concatenated audio tensor.
         """
@@ -441,13 +477,13 @@ class MossTTSDSampleProcessor:
     ) -> Optional["torch.Tensor"]:
         """
         Process audio data from various input formats.
-        
+
         Handles single audio files, multi-speaker audio dictionaries, or None input.
-        
+
         Args:
             prompt_audio: Audio input in various formats (path, dict, tensor tuple, or None).
             target_sample_rate: Target sample rate for processing.
-            
+
         Returns:
             Processed audio tensor or None if no audio provided.
         """
@@ -468,17 +504,17 @@ class MossTTSDSampleProcessor:
     ) -> np.ndarray:
         """
         Build input grid from text and optional audio data.
-        
+
         Creates a TxC grid where column 0 contains text tokens and columns 1..C-1 contain
         quantized audio codebook tokens. Audio tokens are mapped to speech token range.
-        
+
         Args:
             text: Input text string to process.
             audio_data: Optional audio tensor with shape (channels, time).
             apply_chat_template: Function to apply chat template formatting.
             silence_duration: Duration of silence to append for encoder segmentation.
             **kwargs: Additional arguments for chat template.
-            
+
         Returns:
             NumPy array with shape (T, max_channels) containing the input grid.
         """
@@ -517,19 +553,19 @@ class MossTTSDSampleProcessor:
     def _shift_inputs(input_ids: np.ndarray, pad_token_id: int, max_channels: int) -> np.ndarray:
         """
         Convert (T, C) grid to time-shifted multi-channel layout (preserving original implementation logic).
-        
+
         Creates a shifted layout where new_len = T + C - 1, with column j shifted backwards by j positions.
         This enables the model to process multiple codebook channels with temporal alignment.
-        
+
         Args:
             input_ids: Input grid with shape (T, C).
             pad_token_id: Padding token ID for text tokens.
             max_channels: Maximum number of channels.
-            
+
         Returns:
             Shifted array with shape (T + max_channels - 1, max_channels).
         """
-        T, C = input_ids.shape
+        T, _ = input_ids.shape
         new_len = T + max_channels - 1
         shifted = np.full((new_len, max_channels), fill_value=1024, dtype=np.int64)
         shifted[:, 0] = np.full(new_len, pad_token_id, dtype=np.int64)
@@ -540,37 +576,36 @@ class MossTTSDSampleProcessor:
 
 class MossTTSDProcessor(ProcessorMixin):
     r"""
-    Constructs a MOSS-TTSD processor which wraps a tokenizer, feature extractor, and audio tokenizer
-    into a single processor. It provides unified text-speech processing capabilities while maintaining
-    backward compatibility with previous API versions.
-    
-    This processor internally uses MossTTSDSampleProcessor for per-sample processing, while the main
-    processor handles aggregation, parameter filling, and validation.
-    
+    Constructs a MOSS-TTSD processor which wraps a tokenizer, feature extractor, and audio tokenizer into a single
+    processor. It provides unified text-speech processing capabilities while maintaining backward compatibility with
+    previous API versions.
+
+    [`MossTTSDProcessor`] offers all the functionalities of [`AutoTokenizer`], [`AutoFeatureExtractor`] and
+    [`XYTokenizer`]. See the [`~MossTTSDProcessor.__call__`] and [`~MossTTSDProcessor.decode`] for more information.
+
     Args:
-        tokenizer (`AutoTokenizer`):
+        tokenizer ([`AutoTokenizer`]):
             An instance of [`AutoTokenizer`]. The tokenizer is a required input.
-        feature_extractor (`AutoFeatureExtractor`):
+        feature_extractor ([`AutoFeatureExtractor`]):
             An instance of [`AutoFeatureExtractor`]. The feature extractor is a required input.
-        audio_tokenizer (`XYTokenizer`):
+        audio_tokenizer ([`XYTokenizer`]):
             An instance of [`XYTokenizer`]. The audio tokenizer is a required input.
         chat_template (`str`, *optional*):
             A template string for chat formatting when combining text and audio interactions.
-        speech_token_range (`List[int]`, *optional*):
-            Token range [start, end] for mapping speech tokens. Defaults to [151665, 152689].
+        speech_token_range (`List[int]`, *optional*, defaults to `[151665, 152689]`):
+            Token range [start, end] for mapping speech tokens.
         audio_bos_token (`str`, *optional*, defaults to `"<|begin_of_speech|>"`):
             Beginning of speech token string.
         audio_eos_token (`str`, *optional*, defaults to `"<|end_of_speech|>"`):
             End of speech token string.
-        audio_pad_token_id (`int`, *optional*, defaults to 1024):
+        audio_pad_token_id (`int`, *optional*, defaults to `1024`):
             Padding token ID for audio channels.
     """
 
-    tokenizer_class = "AutoTokenizer"
-    feature_extractor_class = "XYTokenizerFeatureExtractor"
-    audio_tokenizer_class = "XYTokenizer"
-
     attributes = ["tokenizer", "feature_extractor", "audio_tokenizer"]
+    feature_extractor_class = "XYTokenizerFeatureExtractor"
+    tokenizer_class = "AutoTokenizer"
+    audio_tokenizer_class = "XYTokenizer"
 
     def __init__(
         self,
@@ -578,7 +613,7 @@ class MossTTSDProcessor(ProcessorMixin):
         feature_extractor,
         audio_tokenizer,
         chat_template: Optional[str] = None,
-        speech_token_range: Optional[List[int]] = None,
+        speech_token_range: Optional[list[int]] = None,
         audio_bos_token: str = "<|begin_of_speech|>",
         audio_eos_token: str = "<|end_of_speech|>",
         audio_pad_token_id: int = 1024,
@@ -621,15 +656,13 @@ class MossTTSDProcessor(ProcessorMixin):
     def from_pretrained(cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs):
         """
         Instantiate a processor from a pretrained model.
-        
-        Loads tokenizer, feature extractor, and audio tokenizer from the specified path.
-        
+
         Args:
             pretrained_model_name_or_path (`str` or `os.PathLike`):
                 The name of or path to the pretrained model.
             **kwargs:
                 Additional keyword arguments passed to the respective component loaders.
-                
+
         Returns:
             [`MossTTSDProcessor`]: A new instance of the processor.
         """
@@ -666,16 +699,19 @@ class MossTTSDProcessor(ProcessorMixin):
     ) -> BatchEncoding:
         """
         Main method to prepare inputs for the model from structured data.
-        
-        Maintains backward compatibility while internally using HF-style kwargs merging.
-        
+
+        This method forwards the `data` and `kwargs` arguments to prepare inputs for MOSS-TTSD model. Please refer to the
+        docstring of the respective methods for more information.
+
         Args:
-            data: Single dictionary or list of dictionaries containing input data.
-                Expected keys include 'text', 'prompt_text', 'prompt_audio', etc.
-            **kwargs: Additional processing arguments.
-            
+            data (`dict` or `list[dict]`):
+                Single dictionary or list of dictionaries containing input data. Expected keys include 'text',
+                'prompt_text', 'prompt_audio', etc.
+            **kwargs (`MossTTSDProcessorKwargs`):
+                Additional processing arguments.
+
         Returns:
-            BatchEncoding: Processed inputs ready for model consumption.
+            [`BatchEncoding`]: Processed inputs ready for model consumption.
         """
         if isinstance(data, dict):
             data = [data]
@@ -697,7 +733,7 @@ class MossTTSDProcessor(ProcessorMixin):
         def _apply_chat_template(text: str, extra: dict) -> str:
             return self.apply_chat_template(conversation=None, text=text, **extra)
 
-        samples: List[MossTTSDChatSample] = []
+        samples: list[MossTTSDChatSample] = []
         for item in data:
             sample = self.sample_processor.prepare_sample(
                 item,
@@ -732,20 +768,20 @@ class MossTTSDProcessor(ProcessorMixin):
     def shifting_outputs(
         self,
         output_ids: "torch.Tensor",
-        speech_token_range: List[int],
+        speech_token_range: list[int],
         max_channels: int = 8,
     ) -> "torch.Tensor":
         """
         Restore time-shifted layout to per-timestep C-channel arrangement and reverse-offset first codebook.
-        
+
         Converts the time-shifted multi-channel output back to standard (batch, time, channels) format
         and maps the first codebook tokens back to their original space by subtracting the speech token offset.
-        
+
         Args:
             output_ids: Time-shifted output tensor.
             speech_token_range: Speech token range for reverse mapping.
             max_channels: Number of codebook channels.
-            
+
         Returns:
             Restored tensor with shape (batch, seq_len, max_channels).
         """
@@ -760,14 +796,14 @@ class MossTTSDProcessor(ProcessorMixin):
     def _find_max_valid_positions(self, data: "torch.Tensor", invalid_value: int = 1024):
         """
         Locate continuous valid audio segment intervals in each sequence (all non-text channels valid simultaneously).
-        
+
         Identifies contiguous spans where all audio channels (columns 1+) contain valid tokens
         (not the invalid_value padding token).
-        
+
         Args:
             data: Input tensor with shape (batch, time, channels).
             invalid_value: Token ID considered as invalid/padding.
-            
+
         Returns:
             List of lists containing valid audio segments for each sequence in the batch.
         """
@@ -795,18 +831,23 @@ class MossTTSDProcessor(ProcessorMixin):
     def batch_decode(self, token_ids: "torch.Tensor", *args, **kwargs):
         """
         Decode a batch of token sequences into text and audio outputs.
-        
+
+        This method forwards the `token_ids` and `kwargs` arguments to decode text and audio outputs from the model.
+        Please refer to the docstring of the respective methods for more information.
+
         Args:
-            token_ids: Token tensor with shape (batch, time, channels).
-            *args: Additional arguments passed to tokenizer.batch_decode.
-            **kwargs: Additional keyword arguments passed to tokenizer.batch_decode.
-            
+            token_ids (`torch.Tensor`):
+                Token tensor with shape (batch, time, channels).
+            *args:
+                Additional arguments passed to tokenizer.batch_decode.
+            **kwargs:
+                Additional keyword arguments passed to tokenizer.batch_decode.
+
         Returns:
-            Tuple of (text_list, audio_list) where text_list contains decoded text strings
-            and audio_list contains decoded audio arrays for each sequence.
+            `tuple`: Tuple of (text_list, audio_list) where text_list contains decoded text strings and audio_list
+                contains decoded audio arrays for each sequence.
         """
         assert token_ids.ndim == 3 and token_ids.shape[2] == self.max_channels
-        B, T, C = token_ids.shape
         text = self.tokenizer.batch_decode(token_ids[:, :, 0], *args, **kwargs)
         normal = self.shifting_outputs(token_ids, self.speech_token_range, self.max_channels)
         audio_frags = self._find_max_valid_positions(normal, self.audio_pad_token_id)
@@ -822,14 +863,20 @@ class MossTTSDProcessor(ProcessorMixin):
     def decode(self, token_ids: "torch.Tensor", *args, **kwargs) -> MossTTSDResponse:
         """
         Decode a single sequence of token IDs into text and audio.
-        
+
+        This method forwards the `token_ids` and `kwargs` arguments to decode a single sequence. Please refer to the
+        docstring of the respective methods for more information.
+
         Args:
-            token_ids: Token tensor with shape (time, channels).
-            *args: Additional arguments passed to tokenizer.decode.
-            **kwargs: Additional keyword arguments passed to tokenizer.decode.
-            
+            token_ids (`torch.Tensor`):
+                Token tensor with shape (time, channels).
+            *args:
+                Additional arguments passed to tokenizer.decode.
+            **kwargs:
+                Additional keyword arguments passed to tokenizer.decode.
+
         Returns:
-            MossTTSDResponse: Response object containing generated text, audio, and sampling rate.
+            [`MossTTSDResponse`]: Response object containing generated text, audio, and sampling rate.
         """
         assert token_ids.ndim == 2 and token_ids.shape[1] == self.max_channels
         text = self.tokenizer.decode(token_ids[:, 0].squeeze(-1), *args, **kwargs)
